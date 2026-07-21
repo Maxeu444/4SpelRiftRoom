@@ -208,7 +208,7 @@ function TeamTimelinePanel({ analysis }: { analysis: TeamAnalysis }) {
         <div className="timeline-cards">
           <article><span>Morts / partie</span><strong>{formatMetric(timeline.teamDeathsPerGame, "", 1)}</strong><small>tous membres du roster confondus</small></article>
           <article><span>Morts à risque</span><strong>{formatMetric(timeline.riskyDeathsPerGame, "", 1)}</strong><small>heuristique : isolement + information absente</small></article>
-          <article><span>Vision objectif</span><strong>{formatMetric(timeline.objectiveVisionRate, "%")}</strong><small>ward alliée 90 s avant, rayon 2 500</small></article>
+          <article><span>Vision objectif</span><strong>{formatMetric(timeline.objectiveVisionRate, "%")}</strong><small>ward du roster dans les 90 s avant</small></article>
           <article><span>Roster complet</span><strong>{formatMetric(timeline.fullRosterPresenceRate, "%")}</strong><small>présent dans le rayon d'objectif</small></article>
         </div>
         <div className="death-windows"><div><strong>Fenêtres de morts</strong><small>moyenne par partie · ce n'est pas un verdict sur une mort individuelle</small></div><div className="window-bars">{windows.map(([label, value]) => <div className={`window-bar ${label === "20–25" ? "focus" : ""}`} key={label}><span>{label}</span><i><b style={{ width: `${Math.max((value / maxWindow) * 100, value ? 7 : 0)}%` }} /></i><strong>{value.toFixed(1)}</strong></div>)}</div></div>

@@ -328,6 +328,11 @@ const timelineWindowLabels = {
   late: "25+ min"
 } as const;
 
+// Les événements WARD_PLACED de Match-V5 donnent le créateur et l'horodatage,
+// mais leur position n'est pas systématiquement disponible. La préparation se
+// mesure donc par une ward du roster posée avant la prise de l'objectif.
+const objectiveWardWindowMs = 90_000;
+
 const engageChampions = new Set([
   "Alistar", "Amumu", "Azir", "Diana", "Galio", "Gragas", "JarvanIV", "Kennen", "Leona", "Maokai", "Malphite", "Nautilus", "Neeko", "Nocturne", "Ornn", "Rakan", "Rell", "Sejuani", "Sion", "Skarner", "Wukong", "Zac"
 ]);
@@ -632,8 +637,9 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
       const teammateDistance = distance(victimPosition, teammatePosition);
       return teammateDistance !== null && teammateDistance <= 2_500;
     });
-    const nearbyWard = wardEvents.some((ward) => {
-      if (ward.timestamp < event.timestamp - 90_000 || ward.timestamp > event.timestamp) return false;
+    const wardPositionsAvailable = wardEvents.some((ward) => Boolean(ward.position));
+    const nearbyWard = !wardPositionsAvailable || wardEvents.some((ward) => {
+      if (ward.timestamp < event.timestamp - objectiveWardWindowMs || ward.timestamp > event.timestamp) return false;
       const wardDistance = distance(victimPosition, ward.position);
       return wardDistance !== null && wardDistance <= 2_500;
     });
@@ -655,13 +661,9 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
   for (const objective of objectives) {
     if (!objective.position) continue;
     const frame = closestFrame(frames, objective.timestamp);
-    const nearbyWards = wardEvents.filter((ward) => {
-      if (ward.timestamp < objective.timestamp - 90_000 || ward.timestamp > objective.timestamp) return false;
-      const wardDistance = distance(ward.position, objective.position);
-      return wardDistance !== null && wardDistance <= 2_500;
-    });
-    if (nearbyWards.length) objectivesWithVision += 1;
-    for (const ward of nearbyWards) {
+    const wardsBeforeObjective = wardEvents.filter((ward) => ward.timestamp >= objective.timestamp - objectiveWardWindowMs && ward.timestamp <= objective.timestamp);
+    if (wardsBeforeObjective.length) objectivesWithVision += 1;
+    for (const ward of wardsBeforeObjective) {
       const player = playerByParticipantId.get(ward.creatorId!);
       if (!player) continue;
       const wardKey = `${player.puuid}:${ward.timestamp}`;
@@ -699,11 +701,11 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
         teamWon: Boolean(match.teamParticipants[0]?.win),
         objective: label,
         gameTimestampSeconds: Math.round(objective.timestamp / 1_000),
-        wardsBefore: nearbyWards.length,
+        wardsBefore: wardsBeforeObjective.length,
         presentPlayers,
         rosterPlayers: playerByParticipantId.size,
         deathsBefore,
-        ready: nearbyWards.length > 0 && presentPlayers >= requiredPresence && deathsBefore === 0
+        ready: wardsBeforeObjective.length > 0 && presentPlayers >= requiredPresence && deathsBefore === 0
       });
     }
   }
