@@ -1,4 +1,5 @@
-import { analyzeTeamMatches, findTeamMatches, type SyncedTimeline } from "@/lib/analytics";
+import { analyzeTeamMatches, findTeamMatches } from "@/lib/analytics";
+import { getChampionNamesById } from "@/lib/data-dragon";
 import { asRegionalRouting, getMatch, getMatchIds, getMatchTimeline, resolveRiotAccount } from "@/lib/riot";
 
 export const runtime = "nodejs";
@@ -49,22 +50,20 @@ export async function POST(request: Request) {
 
     const rawMatches = await Promise.all(sharedMatchIds.map((matchId) => getMatch(regionalRouting, matchId)));
     const matches = findTeamMatches(rawMatches, new Set(accounts.map((account) => account.puuid)), minTeammates);
-    // Les timelines sont plus lourdes que les rÃ©sumÃ©s de match. On les limite aux parties les plus rÃ©centes
-    // pour produire des signaux d'objectifs utiles sans dÃ©grader la synchronisation complÃ¨te.
-    const timelines = (await Promise.all(matches.slice(0, TIMELINE_SAMPLE_SIZE).map(async (match): Promise<SyncedTimeline | null> => {
-      try {
-        return { matchId: match.id, timeline: await getMatchTimeline(regionalRouting, match.id) };
-      } catch (error) {
-        console.warn(`Timeline indisponible pour ${match.id}`, error);
-        return null;
-      }
-    }))).filter((timeline): timeline is SyncedTimeline => Boolean(timeline));
+    const timelineResults = await Promise.allSettled(matches.slice(0, TIMELINE_SAMPLE_SIZE).map(async (match) => [match.id, await getMatchTimeline(regionalRouting, match.id)] as const));
+    const timelines = new Map(timelineResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+    const championNames = await getChampionNamesById();
 
     return Response.json({
       roster: accounts.map(({ puuid, gameName, tagLine }) => ({ puuid, gameName, tagLine })),
       matches,
-      analysis: analyzeTeamMatches(matches, timelines),
-      scanned: { requestedMatchesPerPlayer: matchCount, candidateMatches: sharedMatchIds.length, retainedMatches: matches.length }
+      analysis: analyzeTeamMatches(matches, timelines, championNames, accounts.length),
+      scanned: {
+        requestedMatchesPerPlayer: matchCount,
+        candidateMatches: sharedMatchIds.length,
+        retainedMatches: matches.length,
+        retainedTimelines: timelines.size
+      }
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "La synchronisation a échoué.";
