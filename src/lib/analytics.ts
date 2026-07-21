@@ -1,6 +1,7 @@
 import type { CoachingInsight, Role } from "./types";
 
 export type RiotParticipant = {
+  participantId?: number;
   puuid: string;
   summonerName: string;
   riotIdGameName?: string;
@@ -23,6 +24,29 @@ export type RiotMatch = {
   metadata: { matchId: string };
   info: { gameDuration: number; gameEndTimestamp?: number; participants: RiotParticipant[] };
 };
+
+export type RiotTimelineEvent = {
+  type: string;
+  timestamp: number;
+  monsterType?: string;
+  killerId?: number;
+  creatorId?: number;
+  victimId?: number;
+  position?: { x: number; y: number };
+};
+
+export type RiotTimelineFrame = {
+  timestamp: number;
+  events?: RiotTimelineEvent[];
+  participantFrames?: Record<string, { participantId?: number; position?: { x: number; y: number } }>;
+};
+
+export type RiotMatchTimeline = {
+  metadata: { matchId: string };
+  info: { frames: RiotTimelineFrame[] };
+};
+
+export type SyncedTimeline = { matchId: string; timeline: RiotMatchTimeline };
 
 export type SyncedMatch = {
   id: string;
@@ -71,7 +95,28 @@ export type TeamAnalysis = {
   players: PlayerAnalysis[];
   playerRoles: PlayerRoleAnalysis[];
   champions: ChampionAnalysis[];
+  objectiveSetup: ObjectiveSetupAnalysis | null;
   insights: CoachingInsight[];
+};
+
+export type ObjectiveSetupEvent = {
+  matchId: string;
+  objective: "Dragon" | "Herald" | "Baron";
+  timestampSeconds: number;
+  wardsBefore: number;
+  playersPresent: number;
+  deathsBefore: number;
+  ready: boolean;
+};
+
+export type ObjectiveSetupAnalysis = {
+  sampledMatches: number;
+  objectives: number;
+  setupRate: number;
+  averageWardsBefore: number;
+  averagePlayersPresent: number;
+  averageDeathsBefore: number;
+  recentObjectives: ObjectiveSetupEvent[];
 };
 
 export function normalizeRole(position?: string): Role {
@@ -186,7 +231,71 @@ function deriveInsights(summary: TeamSummary | null): CoachingInsight[] {
   ];
 }
 
-export function analyzeTeamMatches(matches: SyncedMatch[]): TeamAnalysis {
+const fallbackObjectivePositions: Record<ObjectiveSetupEvent["objective"], { x: number; y: number }> = {
+  Dragon: { x: 9866, y: 4414 },
+  Herald: { x: 5000, y: 10400 },
+  Baron: { x: 5000, y: 10400 }
+};
+
+function objectiveName(event: RiotTimelineEvent): ObjectiveSetupEvent["objective"] | null {
+  if (event.type !== "ELITE_MONSTER_KILL") return null;
+  if (event.monsterType === "DRAGON" || event.monsterType === "ELDER_DRAGON") return "Dragon";
+  if (event.monsterType === "RIFTHERALD") return "Herald";
+  if (event.monsterType === "BARON_NASHOR") return "Baron";
+  return null;
+}
+
+function distance(left: { x: number; y: number }, right: { x: number; y: number }) {
+  return Math.hypot(left.x - right.x, left.y - right.y);
+}
+
+function analyzeObjectiveSetup(matches: SyncedMatch[], timelines: SyncedTimeline[]): ObjectiveSetupAnalysis | null {
+  if (!timelines.length) return null;
+  const timelineByMatch = new Map(timelines.map((item) => [item.matchId, item.timeline]));
+  const objectives: ObjectiveSetupEvent[] = [];
+
+  for (const match of matches) {
+    const timeline = timelineByMatch.get(match.id);
+    if (!timeline) continue;
+    const teamParticipantIds = new Set(match.teamParticipants.map((player) => player.participantId).filter((id): id is number => Number.isInteger(id)));
+    if (!teamParticipantIds.size) continue;
+
+    const frames = timeline.info.frames ?? [];
+    const events = frames.flatMap((frame) => frame.events ?? []).sort((left, right) => left.timestamp - right.timestamp);
+    for (const event of events) {
+      const objective = objectiveName(event);
+      if (!objective) continue;
+      const objectivePosition = event.position ?? fallbackObjectivePositions[objective];
+      const setupEvents = events.filter((candidate) => candidate.timestamp >= event.timestamp - 60_000 && candidate.timestamp < event.timestamp);
+      const wardsBefore = setupEvents.filter((candidate) => candidate.type === "WARD_PLACED" && teamParticipantIds.has(candidate.creatorId ?? -1) && candidate.position && distance(candidate.position, objectivePosition) <= 3_500).length;
+      const deathsBefore = setupEvents.filter((candidate) => candidate.type === "CHAMPION_KILL" && teamParticipantIds.has(candidate.victimId ?? -1)).length;
+      const frameBeforeObjective = [...frames].reverse().find((frame) => frame.timestamp <= event.timestamp);
+      const playersPresent = Object.values(frameBeforeObjective?.participantFrames ?? {}).filter((participant) => teamParticipantIds.has(participant.participantId ?? -1) && participant.position && distance(participant.position, objectivePosition) <= 3_500).length;
+      objectives.push({
+        matchId: match.id,
+        objective,
+        timestampSeconds: Math.round(event.timestamp / 1_000),
+        wardsBefore,
+        playersPresent,
+        deathsBefore,
+        ready: wardsBefore > 0 && playersPresent >= 4 && deathsBefore === 0
+      });
+    }
+  }
+
+  if (!objectives.length) return null;
+  return {
+    sampledMatches: timelines.length,
+    objectives: objectives.length,
+    setupRate: round((objectives.filter((objective) => objective.ready).length / objectives.length) * 100),
+    averageWardsBefore: round(objectives.reduce((total, objective) => total + objective.wardsBefore, 0) / objectives.length, 2),
+    averagePlayersPresent: round(objectives.reduce((total, objective) => total + objective.playersPresent, 0) / objectives.length, 1),
+    averageDeathsBefore: round(objectives.reduce((total, objective) => total + objective.deathsBefore, 0) / objectives.length, 2),
+    recentObjectives: objectives.slice(0, 8)
+  };
+}
+
+export function analyzeTeamMatches(matches: SyncedMatch[], timelines: SyncedTimeline[] = []): TeamAnalysis {
   const summary = summarizeTeamMatches(matches);
   const playerTotals = new Map<string, {
     player: RiotParticipant;
@@ -330,5 +439,5 @@ export function analyzeTeamMatches(matches: SyncedMatch[]): TeamAnalysis {
     }))
     .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
 
-  return { summary, players, playerRoles, champions, insights: deriveInsights(summary) };
+  return { summary, players, playerRoles, champions, objectiveSetup: analyzeObjectiveSetup(matches, timelines), insights: deriveInsights(summary) };
 }

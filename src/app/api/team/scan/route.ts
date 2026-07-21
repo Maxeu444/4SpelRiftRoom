@@ -1,7 +1,11 @@
-import { analyzeTeamMatches, findTeamMatches } from "@/lib/analytics";
-import { asRegionalRouting, getMatch, getMatchIds, resolveRiotAccount } from "@/lib/riot";
+import { analyzeTeamMatches, findTeamMatches, type SyncedTimeline } from "@/lib/analytics";
+import { asRegionalRouting, getMatch, getMatchIds, getMatchTimeline, resolveRiotAccount } from "@/lib/riot";
 
 export const runtime = "nodejs";
+
+const DEFAULT_MATCH_HISTORY_SIZE = 100;
+const TEAM_MATCH_SAMPLE_SIZE = 40;
+const TIMELINE_SAMPLE_SIZE = 8;
 
 type ScanPlayer = { gameName: string; tagLine: string };
 
@@ -27,7 +31,7 @@ export async function POST(request: Request) {
 
     const regionalRouting = asRegionalRouting(body.regionalRouting ?? process.env.RIOT_REGIONAL_ROUTING);
     const minTeammates = Math.max(3, Math.min(body.minTeammates ?? 3, body.players.length));
-    const matchCount = Math.max(10, Math.min(body.matchCount ?? 80, 100));
+    const matchCount = Math.max(10, Math.min(body.matchCount ?? DEFAULT_MATCH_HISTORY_SIZE, 100));
 
     const accounts = await Promise.all(body.players.map((player) => resolveRiotAccount(regionalRouting, player.gameName.trim(), player.tagLine.trim())));
     const matchLists = await Promise.all(accounts.map((account) => getMatchIds(regionalRouting, account.puuid, matchCount)));
@@ -37,19 +41,29 @@ export async function POST(request: Request) {
     for (const ids of matchLists) {
       for (const id of new Set(ids)) occurrences.set(id, (occurrences.get(id) ?? 0) + 1);
     }
-    // L'historique est renvoyé du plus récent au plus ancien : on garde les 20 dernières
-    // parties communes. Au-delà, le temps de réponse devient disproportionné pour une clé dev.
+    // L'historique est renvoyé du plus récent au plus ancien : on garde les 40 dernières
+    // parties communes. Cette taille reste compatible avec la cadence d'une clé Riot de développement.
     const sharedMatchIds = matchLists[0]
       .filter((matchId) => (occurrences.get(matchId) ?? 0) >= minTeammates)
-      .slice(0, 20);
+      .slice(0, TEAM_MATCH_SAMPLE_SIZE);
 
     const rawMatches = await Promise.all(sharedMatchIds.map((matchId) => getMatch(regionalRouting, matchId)));
     const matches = findTeamMatches(rawMatches, new Set(accounts.map((account) => account.puuid)), minTeammates);
+    // Les timelines sont plus lourdes que les rÃ©sumÃ©s de match. On les limite aux parties les plus rÃ©centes
+    // pour produire des signaux d'objectifs utiles sans dÃ©grader la synchronisation complÃ¨te.
+    const timelines = (await Promise.all(matches.slice(0, TIMELINE_SAMPLE_SIZE).map(async (match): Promise<SyncedTimeline | null> => {
+      try {
+        return { matchId: match.id, timeline: await getMatchTimeline(regionalRouting, match.id) };
+      } catch (error) {
+        console.warn(`Timeline indisponible pour ${match.id}`, error);
+        return null;
+      }
+    }))).filter((timeline): timeline is SyncedTimeline => Boolean(timeline));
 
     return Response.json({
       roster: accounts.map(({ puuid, gameName, tagLine }) => ({ puuid, gameName, tagLine })),
       matches,
-      analysis: analyzeTeamMatches(matches),
+      analysis: analyzeTeamMatches(matches, timelines),
       scanned: { requestedMatchesPerPlayer: matchCount, candidateMatches: sharedMatchIds.length, retainedMatches: matches.length }
     });
   } catch (error) {
