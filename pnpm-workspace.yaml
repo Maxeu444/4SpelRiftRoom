@@ -1,0 +1,3 @@
+allowBuilds:
+  # Sharp is optional here: this MVP does not use Next Image optimisation.
+  sharp: false
