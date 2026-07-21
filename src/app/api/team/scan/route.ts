@@ -1,4 +1,5 @@
 import { analyzeTeamMatches, findTeamMatches } from "@/lib/analytics";
+import { isDatabaseConfigured, loadLatestTeamScan, saveTeamScan } from "@/lib/database";
 import { getChampionNamesById } from "@/lib/data-dragon";
 import { asRegionalRouting, getMatch, getMatchIds, getMatchTimeline, resolveRiotAccount } from "@/lib/riot";
 
@@ -23,8 +24,22 @@ function isScanPlayer(value: unknown): value is ScanPlayer {
   return typeof player.gameName === "string" && player.gameName.trim().length > 0 && typeof player.tagLine === "string" && player.tagLine.trim().length > 0;
 }
 
+export async function GET() {
+  try {
+    if (!isDatabaseConfigured()) return Response.json({ result: null, workspace: {} });
+    const latest = await loadLatestTeamScan();
+    return Response.json(latest ?? { result: null, workspace: {} });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Impossible de lire la dernière synchronisation.";
+    return Response.json({ error: message }, { status: 500 });
+  }
+}
+
 export async function POST(request: Request) {
   try {
+    if (!isDatabaseConfigured()) {
+      return Response.json({ error: "DATABASE_URL est absente. Ajoutez la variable PostgreSQL Railway avant de synchroniser." }, { status: 503 });
+    }
     const body = (await request.json()) as ScanRequest;
     if (!Array.isArray(body.players) || body.players.length < 3 || body.players.length > 5 || !body.players.every(isScanPlayer)) {
       return Response.json({ error: "Indiquez entre 3 et 5 Riot ID au format { gameName, tagLine }." }, { status: 400 });
@@ -54,7 +69,7 @@ export async function POST(request: Request) {
     const timelines = new Map(timelineResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
     const championNames = await getChampionNamesById();
 
-    return Response.json({
+    const result = {
       roster: accounts.map(({ puuid, gameName, tagLine }) => ({ puuid, gameName, tagLine })),
       matches,
       analysis: analyzeTeamMatches(matches, timelines, championNames, accounts.length),
@@ -64,7 +79,18 @@ export async function POST(request: Request) {
         retainedMatches: matches.length,
         retainedTimelines: timelines.size
       }
+    };
+
+    await saveTeamScan({
+      roster: result.roster,
+      rawMatches,
+      timelines,
+      result,
+      regionalRouting,
+      minimumTeammates: minTeammates
     });
+
+    return Response.json(result);
   } catch (error) {
     const message = error instanceof Error ? error.message : "La synchronisation a échoué.";
     return Response.json({ error: message }, { status: 500 });

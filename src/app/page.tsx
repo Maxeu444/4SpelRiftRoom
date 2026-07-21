@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ChampionAnalysis, ObjectiveSetup, ObjectiveSetupAnalysis, PlayerAnalysis, SyncedMatch, TeamAnalysis, TimelinePlayerStats } from "@/lib/analytics";
 import type { ScoutingReport } from "@/lib/scouting";
 import type { CoachingInsight, Role } from "@/lib/types";
@@ -51,6 +51,21 @@ type TeamMilestoneProgress = Record<TeamMilestoneId, boolean>;
 type ReviewDraft = { source: string; pattern: string; action: string };
 type ReviewEntry = ReviewDraft & { id: number };
 type DraftPlan = { planA: string; planB: string; notes: string };
+type WorkspaceState = {
+  roleAssignments: Record<string, Role>;
+  callerAssignments: CallerAssignments;
+  sessionFocus: SessionFocusId | "";
+  playbookPlayerId: string;
+  championTracks: ChampionTrackAssignments;
+  playerAxes: PlayerDevelopmentAxes;
+  trainingStatus: TrainingSessionStatus;
+  trainingGoal: string;
+  trainingChecklist: TrainingChecklist;
+  milestoneProgress: TeamMilestoneProgress;
+  reviews: ReviewEntry[];
+  targetBans: string[];
+  draftPlan: DraftPlan;
+};
 
 const callerDomains: { id: CallerDomain; label: string; description: string; preferredRoles: Role[] }[] = [
   { id: "macro", label: "Objectifs & tempo", description: "Décide du drake, héraut ou Baron à préparer.", preferredRoles: ["JUNGLE", "UTILITY", "MIDDLE"] },
@@ -406,7 +421,7 @@ function ReviewDashboard({ analysis, onSync }: { analysis: TeamAnalysis | null; 
   if (!analysis) return <EmptyDashboard onSync={onSync} coaching />;
   const review = analysis.sessionReview;
   const statusLabel = { "on-track": "Dans le bon sens", watch: "À stabiliser", review: "À valider" };
-  return <section className="review-view"><section className="review-hero"><div><p className="eyebrow">Bilan de session · instantané</p><h2>{review?.title ?? "Synchronisez des parties pour lancer la review"}</h2><p>{review?.evidence ?? "Rift Room produira une priorité lorsque les données de groupe seront disponibles."}</p></div>{review && <div className="review-action"><span>Une seule action suivante</span><strong>{review.nextAction}</strong></div>}</section><section className="panel milestones"><div className="panel-head"><div><p className="eyebrow">Playbook 4Spel</p><h2>Les quatre paliers, à cette session</h2></div><span className="pill">Non sauvegardé</span></div><p className="session-note">Sans base de données, ce suivi est recalculé à la synchronisation et ne trace pas encore votre progression dans le temps.</p><div className="milestone-grid">{analysis.milestones.map((milestone) => <article className={`milestone ${milestone.status}`} key={milestone.id}><div><span className="milestone-status">{statusLabel[milestone.status]}</span><h3>{milestone.title}</h3><p>{milestone.evidence}</p></div><div className="milestone-action">↗ {milestone.action}</div>{!milestone.automated && <small>Validation humaine recommandée</small>}</article>)}</div></section><section className="dashboard-grid review-grid"><article className="panel"><div className="panel-head"><div><p className="eyebrow">Draft · cinq joueurs du roster</p><h2>Résultats par plan de compo</h2></div></div>{analysis.draft.compositions.length ? <div className="draft-list">{analysis.draft.compositions.map((composition) => <div className="draft-row" key={composition.label}><span>{composition.label}</span><small>{composition.games} partie{composition.games > 1 ? "s" : ""}</small><strong>{composition.winRate} %</strong></div>)}</div> : <p className="empty-state">Il faut une partie où les cinq joueurs renseignés ont joué ensemble. La classification est volontairement simple : engage, pick, scaling ou hybride.</p>}</article><article className="panel"><div className="panel-head"><div><p className="eyebrow">Bans rencontris</p><h2>Ce que les adversaires retirent</h2></div></div>{analysis.draft.opponentBans.length ? <div className="draft-list bans-list">{analysis.draft.opponentBans.map((ban) => <div className="draft-row" key={ban.champion}><span>{ban.champion}</span><strong>{ban.bans} ban{ban.bans > 1 ? "s" : ""}</strong></div>)}</div> : <p className="empty-state">Aucun ban adverse exploitable n'a été retourné par les parties synchronisées.</p>}</article></section><section className="panel methodology"><p className="eyebrow">Méthode</p><h2>Ce que le tableau mesure — et ce qu'il ne prétend pas savoir</h2><p>Les wards et les événements d'objectif sont issus de la Timeline. Les positions sont des instantanés : la présence d'équipe est donc un proxy. Les paliers « teamfights » et « draft avec intention » doivent être confirmés pendant votre review, pas délégués aveuglément à une formule.</p></section></section>;
+  return <section className="review-view"><section className="review-hero"><div><p className="eyebrow">Bilan de session · instantané</p><h2>{review?.title ?? "Synchronisez des parties pour lancer la review"}</h2><p>{review?.evidence ?? "Rift Room produira une priorité lorsque les données de groupe seront disponibles."}</p></div>{review && <div className="review-action"><span>Une seule action suivante</span><strong>{review.nextAction}</strong></div>}</section><section className="panel milestones"><div className="panel-head"><div><p className="eyebrow">Playbook 4Spel</p><h2>Les quatre paliers, à cette session</h2></div><span className="pill">Sauvegardé</span></div><p className="session-note">La configuration du playbook et vos reviews sont enregistrées avec l'équipe. Les mesures Riot restent recalculées à chaque synchronisation.</p><div className="milestone-grid">{analysis.milestones.map((milestone) => <article className={`milestone ${milestone.status}`} key={milestone.id}><div><span className="milestone-status">{statusLabel[milestone.status]}</span><h3>{milestone.title}</h3><p>{milestone.evidence}</p></div><div className="milestone-action">↗ {milestone.action}</div>{!milestone.automated && <small>Validation humaine recommandée</small>}</article>)}</div></section><section className="dashboard-grid review-grid"><article className="panel"><div className="panel-head"><div><p className="eyebrow">Draft · cinq joueurs du roster</p><h2>Résultats par plan de compo</h2></div></div>{analysis.draft.compositions.length ? <div className="draft-list">{analysis.draft.compositions.map((composition) => <div className="draft-row" key={composition.label}><span>{composition.label}</span><small>{composition.games} partie{composition.games > 1 ? "s" : ""}</small><strong>{composition.winRate} %</strong></div>)}</div> : <p className="empty-state">Il faut une partie où les cinq joueurs renseignés ont joué ensemble. La classification est volontairement simple : engage, pick, scaling ou hybride.</p>}</article><article className="panel"><div className="panel-head"><div><p className="eyebrow">Bans rencontris</p><h2>Ce que les adversaires retirent</h2></div></div>{analysis.draft.opponentBans.length ? <div className="draft-list bans-list">{analysis.draft.opponentBans.map((ban) => <div className="draft-row" key={ban.champion}><span>{ban.champion}</span><strong>{ban.bans} ban{ban.bans > 1 ? "s" : ""}</strong></div>)}</div> : <p className="empty-state">Aucun ban adverse exploitable n'a été retourné par les parties synchronisées.</p>}</article></section><section className="panel methodology"><p className="eyebrow">Méthode</p><h2>Ce que le tableau mesure — et ce qu'il ne prétend pas savoir</h2><p>Les wards et les événements d'objectif sont issus de la Timeline. Les positions sont des instantanés : la présence d'équipe est donc un proxy. Les paliers « teamfights » et « draft avec intention » doivent être confirmés pendant votre review, pas délégués aveuglément à une formule.</p></section></section>;
 }
 
 export default function Home() {
@@ -435,9 +450,60 @@ export default function Home() {
   const [syncState, setSyncState] = useState<"idle" | "loading" | "error">("idle");
   const [syncError, setSyncError] = useState("");
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [workspaceHydrated, setWorkspaceHydrated] = useState(false);
   const analysis = syncResult?.analysis ?? null;
   const selectedPlayer = analysis?.players.find((player) => player.puuid === selectedId) ?? analysis?.players[0];
   const selectedRole = selectedPlayer ? roleAssignments[selectedPlayer.puuid] ?? selectedPlayer.role : "FILL";
+
+  function applySyncResult(data: SyncResult) {
+    setSyncResult(data);
+    setSelectedId(data.analysis.players[0]?.puuid ?? "");
+    setPlaybookPlayerId((current) => data.analysis.players.some((player) => player.puuid === current) ? current : data.analysis.players[0]?.puuid ?? "");
+    setRoleAssignments((current) => Object.fromEntries(data.analysis.players.map((player) => [player.puuid, current[player.puuid] ?? player.role])));
+  }
+
+  function applyWorkspace(workspace: Partial<WorkspaceState>) {
+    if (workspace.roleAssignments) setRoleAssignments(workspace.roleAssignments);
+    if (workspace.callerAssignments) setCallerAssignments(workspace.callerAssignments);
+    if (workspace.sessionFocus !== undefined) setSessionFocus(workspace.sessionFocus);
+    if (workspace.playbookPlayerId) setPlaybookPlayerId(workspace.playbookPlayerId);
+    if (workspace.championTracks) setChampionTracks(workspace.championTracks);
+    if (workspace.playerAxes) setPlayerAxes(workspace.playerAxes);
+    if (workspace.trainingStatus) setTrainingStatus(workspace.trainingStatus);
+    if (workspace.trainingGoal !== undefined) setTrainingGoal(workspace.trainingGoal);
+    if (workspace.trainingChecklist) setTrainingChecklist(workspace.trainingChecklist);
+    if (workspace.milestoneProgress) setMilestoneProgress(workspace.milestoneProgress);
+    if (workspace.reviews) setReviews(workspace.reviews);
+    if (workspace.targetBans) setTargetBans(workspace.targetBans);
+    if (workspace.draftPlan) setDraftPlan(workspace.draftPlan);
+  }
+
+  useEffect(() => {
+    let active = true;
+    async function restoreLatestScan() {
+      try {
+        const response = await fetch("/api/team/scan", { cache: "no-store" });
+        if (!response.ok || !active) return;
+        const data = (await response.json()) as { result?: SyncResult | null; workspace?: Partial<WorkspaceState> };
+        if (data.result) applySyncResult(data.result);
+        if (data.workspace) applyWorkspace(data.workspace);
+        setWorkspaceHydrated(true);
+      } catch {
+        // Une base non configurée ou momentanément indisponible ne bloque pas l'écran initial.
+      }
+    }
+    void restoreLatestScan();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (!workspaceHydrated || !syncResult) return;
+    const workspace: WorkspaceState = { roleAssignments, callerAssignments, sessionFocus, playbookPlayerId, championTracks, playerAxes, trainingStatus, trainingGoal, trainingChecklist, milestoneProgress, reviews, targetBans, draftPlan };
+    const timer = window.setTimeout(() => {
+      void fetch("/api/team/workspace", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(workspace) });
+    }, 500);
+    return () => window.clearTimeout(timer);
+  }, [workspaceHydrated, syncResult, roleAssignments, callerAssignments, sessionFocus, playbookPlayerId, championTracks, playerAxes, trainingStatus, trainingGoal, trainingChecklist, milestoneProgress, reviews, targetBans, draftPlan]);
 
   function updatePlayerRole(playerId: string, role: Role) {
     setRoleAssignments((current) => ({ ...current, [playerId]: role }));
@@ -555,10 +621,8 @@ export default function Home() {
       const response = await fetch("/api/team/scan", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ players, minTeammates: 3, matchCount: REQUESTED_MATCH_HISTORY }) });
       const data = (await response.json()) as SyncResult & { error?: string };
       if (!response.ok) throw new Error(data.error ?? "La synchronisation a échoué.");
-      setSyncResult(data);
-      setSelectedId(data.analysis.players[0]?.puuid ?? "");
-      setPlaybookPlayerId((current) => data.analysis.players.some((player) => player.puuid === current) ? current : data.analysis.players[0]?.puuid ?? "");
-      setRoleAssignments((current) => Object.fromEntries(data.analysis.players.map((player) => [player.puuid, current[player.puuid] ?? player.role])));
+      applySyncResult(data);
+      setWorkspaceHydrated(true);
       setSyncState("idle");
       setSyncOpen(false);
       setSection("team");
