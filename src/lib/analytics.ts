@@ -198,12 +198,33 @@ export type SessionReview = {
   nextAction: string;
 };
 
+export type ObjectiveSetupEvent = {
+  matchId: string;
+  objective: "Dragon" | "Herald" | "Baron";
+  timestampSeconds: number;
+  wardsBefore: number;
+  playersPresent: number;
+  deathsBefore: number;
+  ready: boolean;
+};
+
+export type ObjectiveSetupAnalysis = {
+  sampledMatches: number;
+  objectives: number;
+  setupRate: number;
+  averageWardsBefore: number;
+  averagePlayersPresent: number;
+  averageDeathsBefore: number;
+  recentObjectives: ObjectiveSetupEvent[];
+};
+
 export type TeamAnalysis = {
   summary: TeamSummary | null;
   players: PlayerAnalysis[];
   playerRoles: PlayerRoleAnalysis[];
   champions: ChampionAnalysis[];
   timeline: TeamTimelineSummary;
+  objectiveSetup: ObjectiveSetupAnalysis | null;
   milestones: PlaybookMilestone[];
   draft: DraftAnalysis;
   sessionReview: SessionReview | null;
@@ -743,6 +764,28 @@ function emptyTimelineSummary(): TeamTimelineSummary {
   };
 }
 
+function toObjectiveSetupAnalysis(timeline: TeamTimelineSummary): ObjectiveSetupAnalysis | null {
+  if (!timeline.games || !timeline.objectiveSetups.length) return null;
+  const recentObjectives: ObjectiveSetupEvent[] = timeline.objectiveSetups.map((setup) => ({
+    matchId: setup.matchId,
+    objective: setup.objective === "Héraut" ? "Herald" : setup.objective,
+    timestampSeconds: setup.gameTimestampSeconds,
+    wardsBefore: setup.wardsBefore,
+    playersPresent: setup.presentPlayers,
+    deathsBefore: setup.deathsBefore,
+    ready: setup.ready
+  }));
+  return {
+    sampledMatches: timeline.games,
+    objectives: timeline.objectivesObserved,
+    setupRate: timeline.objectiveVisionRate ?? 0,
+    averageWardsBefore: round(recentObjectives.reduce((total, objective) => total + objective.wardsBefore, 0) / recentObjectives.length, 2),
+    averagePlayersPresent: round(recentObjectives.reduce((total, objective) => total + objective.playersPresent, 0) / recentObjectives.length, 1),
+    averageDeathsBefore: round(recentObjectives.reduce((total, objective) => total + objective.deathsBefore, 0) / recentObjectives.length, 2),
+    recentObjectives
+  };
+}
+
 export function analyzeTeamMatches(
   matches: SyncedMatch[],
   timelines: Map<string, RiotMatchTimeline> = new Map(),
@@ -951,7 +994,7 @@ export function analyzeTeamMatches(
   const priority = insights.find((insight) => insight.type === "priority") ?? insights[0];
   const sessionReview = priority ? { title: priority.title, evidence: priority.detail, nextAction: priority.action } : null;
 
-  return { summary, players, playerRoles, champions, timeline, milestones, draft, sessionReview, insights };
+  return { summary, players, playerRoles, champions, timeline, objectiveSetup: toObjectiveSetupAnalysis(timeline), milestones, draft, sessionReview, insights };
 }
 
 export { timelineWindowLabels };
