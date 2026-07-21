@@ -27,6 +27,12 @@ export type AvailabilitySlot = {
   startMinutes: number;
   endMinutes: number;
 };
+export type LatestTeamSyncInput = {
+  players: Array<{ gameName: string; tagLine: string }>;
+  regionalRouting: string;
+  minTeammates: number;
+  matchCount: number;
+};
 
 type SaveScanInput = {
   roster: RosterPlayer[];
@@ -283,4 +289,42 @@ export async function addLatestTeamAvailability(input: Omit<AvailabilitySlot, "i
 export async function removeLatestTeamAvailability(slotId: number) {
   const teamId = await latestTeamId();
   await getPool().query("DELETE FROM team_availability_slots WHERE id = $1 AND team_id = $2", [slotId, teamId]);
+}
+
+export async function loadLatestTeamSyncInput(): Promise<LatestTeamSyncInput> {
+  const result = await getPool().query<{
+    roster: Array<{ gameName: string; tagLine: string }>;
+    regional_routing: string;
+    minimum_teammates: number;
+    requested_matches_per_player: number;
+  }>(
+    `SELECT response->'roster' AS roster, regional_routing, minimum_teammates, requested_matches_per_player
+     FROM sync_runs
+     WHERE status = 'completed'
+     ORDER BY completed_at DESC
+     LIMIT 1`
+  );
+  const row = result.rows[0];
+  if (!row?.roster?.length) throw new Error("Synchronisez une équipe manuellement avant d'activer le Cron.");
+  return {
+    players: row.roster.map(({ gameName, tagLine }) => ({ gameName, tagLine })),
+    regionalRouting: row.regional_routing,
+    minTeammates: row.minimum_teammates,
+    matchCount: row.requested_matches_per_player
+  };
+}
+
+export async function withSynchronizationLock<T>(task: () => Promise<T>) {
+  const client = await getPool().connect();
+  try {
+    const lock = await client.query<{ locked: boolean }>("SELECT pg_try_advisory_lock(457814) AS locked");
+    if (!lock.rows[0]?.locked) throw new Error("Une synchronisation est déjà en cours. Réessayez dans quelques minutes.");
+    try {
+      return await task();
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(457814)");
+    }
+  } finally {
+    client.release();
+  }
 }

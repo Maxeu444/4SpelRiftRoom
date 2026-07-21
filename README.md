@@ -42,6 +42,18 @@ L’onglet **Planning** permet de saisir les disponibilités hebdomadaires récu
 
 Lorsque FastAPI sera ajouté, le placer comme un second service dans ce même projet, référencer le même `DATABASE_URL` privé et conserver les migrations SQL comme contrat commun entre les deux applications.
 
+## Synchronisation quotidienne Railway
+
+Le dépôt contient un job Cron Railway qui déclenche une synchronisation tous les jours à **7 h heure de Paris**, y compris lors des changements d'heure. Le job démarre à 05:00 et 06:00 UTC, puis le script ne lance la synchronisation que si l'heure locale `Europe/Paris` est bien 07:xx.
+
+1. Dans le projet Railway, créer un second service depuis ce même dépôt, par exemple `daily-sync`.
+2. Dans ce service, définir **Config-as-code file** sur `/railway.cron.toml` afin de ne pas utiliser la commande de démarrage du frontend.
+3. Ajouter `CRON_SECRET` avec une valeur aléatoire longue. Copier exactement cette même variable dans le service Next.js.
+4. Ajouter `CRON_SYNC_URL` avec l'URL privée du service web suivie de `/api/team/cron-sync`, par exemple `http://<domaine-prive-web>/api/team/cron-sync`.
+5. Ajouter `SYNC_TIME_ZONE=Europe/Paris`. Le Cron n'a pas besoin d'une URL publique, ni de `RIOT_API_KEY` ou `DATABASE_URL` : ces secrets restent uniquement dans le service web.
+
+Le premier scan reste manuel : il sert à enregistrer le roster. Ensuite, le Cron relit ce roster depuis PostgreSQL. Un verrou PostgreSQL évite qu'il entre en concurrence avec une synchronisation manuelle.
+
 Le tableau de bord n’affiche aucune donnée tant qu’aucune synchronisation n’est demandée. L’endpoint `POST /api/team/scan` reçoit les Riot ID de l’équipe, croise les Match ID pour ne retenir que les parties avec au moins trois membres jouant dans le même camp, puis calcule les agrégats de groupe, de joueur et de champion. Il analyse les 20 parties de groupe les plus récentes et cadence automatiquement les appels pour respecter les clés de développement Riot.
 
 Exemple :
