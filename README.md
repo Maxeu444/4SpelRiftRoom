@@ -26,6 +26,12 @@ La synchronisation enregistre un instantané complet de l'analyse pour restaurer
 
 Les migrations sont dans `db/migrations/`. Elles ne doivent jamais être modifiées une fois appliquées : ajouter un nouveau fichier numéroté pour chaque évolution du schéma.
 
+## Planning d'équipe
+
+L’onglet **Planning** permet de saisir les disponibilités hebdomadaires récurrentes de chaque membre du roster (jour, heure de début et de fin). Rift Room affiche ensuite, pour chaque jour, les créneaux où tous les joueurs sont disponibles.
+
+À ce stade, l'application ne possède pas encore d'authentification : le membre concerné est sélectionné manuellement dans le formulaire, et toute personne ayant accès à l'espace d'équipe peut modifier un créneau. L'authentification future devra associer chaque compte à son joueur Riot afin de limiter la modification à ses propres disponibilités.
+
 ## Déployer Next.js sur Railway
 
 1. Pousser ce dépôt sur GitHub, puis créer un projet Railway dans une région européenne.

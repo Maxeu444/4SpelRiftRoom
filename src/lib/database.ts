@@ -20,6 +20,13 @@ export type PersistedScanResult = {
 };
 
 export type LatestTeamData = { result: PersistedScanResult; workspace: Record<string, unknown> };
+export type AvailabilitySlot = {
+  id: number;
+  playerPuuid: string;
+  weekday: number;
+  startMinutes: number;
+  endMinutes: number;
+};
 
 type SaveScanInput = {
   roster: RosterPlayer[];
@@ -223,4 +230,57 @@ export async function saveLatestTeamWorkspace(state: Record<string, unknown>) {
      ON CONFLICT (team_id) DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()`,
     [teamId, JSON.stringify(state)]
   );
+}
+
+async function latestTeamId() {
+  const result = await getPool().query<{ team_id: string }>(
+    `SELECT team_id FROM sync_runs WHERE status = 'completed' ORDER BY completed_at DESC LIMIT 1`
+  );
+  const teamId = result.rows[0]?.team_id;
+  if (!teamId) throw new Error("Synchronisez une équipe avant de gérer les disponibilités.");
+  return teamId;
+}
+
+export async function loadLatestTeamAvailability() {
+  const teamId = await latestTeamId();
+  const result = await getPool().query<{
+    id: string;
+    player_puuid: string;
+    weekday: number;
+    start_minutes: number;
+    end_minutes: number;
+  }>(
+    `SELECT id, player_puuid, weekday, start_minutes, end_minutes
+     FROM team_availability_slots
+     WHERE team_id = $1
+     ORDER BY weekday, start_minutes, end_minutes`,
+    [teamId]
+  );
+  return result.rows.map((slot) => ({
+    id: Number(slot.id),
+    playerPuuid: slot.player_puuid,
+    weekday: slot.weekday,
+    startMinutes: slot.start_minutes,
+    endMinutes: slot.end_minutes
+  }));
+}
+
+export async function addLatestTeamAvailability(input: Omit<AvailabilitySlot, "id">) {
+  const teamId = await latestTeamId();
+  const member = await getPool().query(
+    `SELECT 1 FROM team_members WHERE team_id = $1 AND player_puuid = $2`,
+    [teamId, input.playerPuuid]
+  );
+  if (!member.rowCount) throw new Error("Ce joueur ne fait pas partie du roster synchronisé.");
+  await getPool().query(
+    `INSERT INTO team_availability_slots (team_id, player_puuid, weekday, start_minutes, end_minutes)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT DO NOTHING`,
+    [teamId, input.playerPuuid, input.weekday, input.startMinutes, input.endMinutes]
+  );
+}
+
+export async function removeLatestTeamAvailability(slotId: number) {
+  const teamId = await latestTeamId();
+  await getPool().query("DELETE FROM team_availability_slots WHERE id = $1 AND team_id = $2", [slotId, teamId]);
 }
