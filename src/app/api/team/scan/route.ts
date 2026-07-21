@@ -1,4 +1,4 @@
-import { findTeamMatches, summarizeTeamMatches } from "@/lib/analytics";
+import { analyzeTeamMatches, findTeamMatches } from "@/lib/analytics";
 import { asRegionalRouting, getMatch, getMatchIds, resolveRiotAccount } from "@/lib/riot";
 
 export const runtime = "nodejs";
@@ -37,10 +37,11 @@ export async function POST(request: Request) {
     for (const ids of matchLists) {
       for (const id of new Set(ids)) occurrences.set(id, (occurrences.get(id) ?? 0) + 1);
     }
-    const sharedMatchIds = [...occurrences.entries()]
-      .filter(([, occurrences]) => occurrences >= minTeammates)
-      .map(([matchId]) => matchId)
-      .slice(0, 40);
+    // L'historique est renvoyé du plus récent au plus ancien : on garde les 20 dernières
+    // parties communes. Au-delà, le temps de réponse devient disproportionné pour une clé dev.
+    const sharedMatchIds = matchLists[0]
+      .filter((matchId) => (occurrences.get(matchId) ?? 0) >= minTeammates)
+      .slice(0, 20);
 
     const rawMatches = await Promise.all(sharedMatchIds.map((matchId) => getMatch(regionalRouting, matchId)));
     const matches = findTeamMatches(rawMatches, new Set(accounts.map((account) => account.puuid)), minTeammates);
@@ -48,7 +49,7 @@ export async function POST(request: Request) {
     return Response.json({
       roster: accounts.map(({ puuid, gameName, tagLine }) => ({ puuid, gameName, tagLine })),
       matches,
-      summary: summarizeTeamMatches(matches),
+      analysis: analyzeTeamMatches(matches),
       scanned: { requestedMatchesPerPlayer: matchCount, candidateMatches: sharedMatchIds.length, retainedMatches: matches.length }
     });
   } catch (error) {
@@ -56,4 +57,3 @@ export async function POST(request: Request) {
     return Response.json({ error: message }, { status: 500 });
   }
 }
-

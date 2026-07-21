@@ -15,7 +15,7 @@
 2. Copier `.env.example` en `.env.local` et renseigner une clé API Riot.
 3. Exécuter `pnpm dev`, puis ouvrir `http://localhost:3000`.
 
-Le tableau de bord affiche des données d’exemple tant qu’aucune synchronisation n’est demandée. L’endpoint `POST /api/team/scan` est déjà câblé vers Riot : il reçoit les Riot ID de l’équipe, croise les Match ID pour ne retenir que les parties avec au moins trois membres jouant dans le même camp, puis retourne les agrégats de groupe.
+Le tableau de bord n’affiche aucune donnée tant qu’aucune synchronisation n’est demandée. L’endpoint `POST /api/team/scan` reçoit les Riot ID de l’équipe, croise les Match ID pour ne retenir que les parties avec au moins trois membres jouant dans le même camp, puis calcule les agrégats de groupe, de joueur et de champion. Il analyse les 20 parties de groupe les plus récentes et cadence automatiquement les appels pour respecter les clés de développement Riot.
 
 Exemple :
 
