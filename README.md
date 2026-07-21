@@ -28,7 +28,7 @@ Exemple :
   ],
   "regionalRouting": "EUROPE",
   "minTeammates": 3,
-  "matchCount": 80
+  "matchCount": 100
 }
 ```
 

@@ -1,4 +1,4 @@
-import type { RiotMatch } from "./analytics";
+import type { RiotMatch, RiotMatchTimeline } from "./analytics";
 
 const routingValues = ["AMERICAS", "ASIA", "EUROPE", "SEA"] as const;
 export type RegionalRouting = (typeof routingValues)[number];
@@ -77,6 +77,12 @@ export async function getMatchIds(regionalRouting: RegionalRouting, puuid: strin
 export async function getMatch(regionalRouting: RegionalRouting, matchId: string) {
   return riotFetch<RiotMatch>(
     `https://${regionalRouting.toLowerCase()}.api.riotgames.com/lol/match/v5/matches/${encodeURIComponent(matchId)}`
+  );
+}
+
+export async function getMatchTimeline(regionalRouting: RegionalRouting, matchId: string) {
+  return riotFetch<RiotMatchTimeline>(
+    `https://${regionalRouting.toLowerCase()}.api.riotgames.com/lol/match/v5/matches/${encodeURIComponent(matchId)}/timeline`
   );
 }
 
