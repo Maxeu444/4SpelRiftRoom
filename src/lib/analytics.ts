@@ -21,6 +21,13 @@ export type RiotParticipant = {
   totalMinionsKilled: number;
   neutralMinionsKilled: number;
   visionScore: number;
+  totalDamageDealtToChampions?: number;
+  damageDealtToObjectives?: number;
+  totalDamageTaken?: number;
+  timeCCingOthers?: number;
+  turretTakedowns?: number;
+  wardsKilled?: number;
+  visionWardsBoughtInGame?: number;
 };
 
 export type RiotTeam = {
@@ -79,6 +86,7 @@ export type SyncedMatch = {
   playedAt?: number;
   gameStartedAt?: number;
   teamParticipants: RiotParticipant[];
+  teamKills: number;
   opponentBans: number[];
 };
 
@@ -97,6 +105,21 @@ export type TimelinePlayerStats = {
   objectiveParticipationRate: number | null;
 };
 
+export type IndividualMatchStats = {
+  killsPerGame: number;
+  deathsPerGame: number;
+  assistsPerGame: number;
+  killParticipation: number | null;
+  visionScorePerGame: number;
+  damageToChampionsPerMinute: number;
+  objectiveDamagePerMinute: number;
+  damageTakenPerMinute: number;
+  ccSecondsPerMinute: number;
+  turretTakedownsPerGame: number;
+  wardsKilledPerGame: number;
+  controlWardsPerGame: number;
+};
+
 export type PlayerAnalysis = {
   puuid: string;
   displayName: string;
@@ -108,6 +131,7 @@ export type PlayerAnalysis = {
   goldPerMinute: number;
   csPerMinute: number;
   visionPerMinute: number;
+  matchStats: IndividualMatchStats;
   timeline: TimelinePlayerStats;
 };
 
@@ -120,6 +144,7 @@ export type PlayerRoleAnalysis = {
   goldPerMinute: number;
   csPerMinute: number;
   visionPerMinute: number;
+  matchStats: IndividualMatchStats;
   timeline: TimelinePlayerStats;
 };
 
@@ -249,6 +274,26 @@ type TimelineTotals = {
   objectiveOpportunities: number;
 };
 
+type MatchStatsTotals = {
+  games: number;
+  wins: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+  teamKills: number;
+  gold: number;
+  cs: number;
+  vision: number;
+  minutes: number;
+  damageToChampions: number;
+  objectiveDamage: number;
+  damageTaken: number;
+  ccSeconds: number;
+  turretTakedowns: number;
+  wardsKilled: number;
+  controlWards: number;
+};
+
 type MatchTimelineMetric = {
   deaths: number;
   riskyDeaths: number;
@@ -308,6 +353,7 @@ export function findTeamMatches(matches: RiotMatch[], teamPuuids: Set<string>, m
     const teamParticipants = [...bySide.values()].sort((left, right) => right.length - left.length)[0] ?? [];
     if (teamParticipants.length < minimumPlayers) return [];
     const teamId = teamParticipants[0]?.teamId;
+    const teamKills = match.info.participants.filter((participant) => participant.teamId === teamId).reduce((total, participant) => total + participant.kills, 0);
     const opponentBans = match.info.teams
       ?.find((team) => team.teamId !== teamId)
       ?.bans
@@ -319,6 +365,7 @@ export function findTeamMatches(matches: RiotMatch[], teamPuuids: Set<string>, m
       playedAt: match.info.gameEndTimestamp,
       gameStartedAt: match.info.gameStartTimestamp ?? (match.info.gameEndTimestamp ? match.info.gameEndTimestamp - match.info.gameDuration * 1_000 : undefined),
       teamParticipants,
+      teamKills,
       opponentBans
     }];
   });
@@ -434,6 +481,71 @@ function timelinePlayerStats(totals: TimelineTotals): TimelinePlayerStats {
     wardsPerGame: perGame(totals.wards),
     wardsBeforeObjectivesPerGame: perGame(totals.wardsBeforeObjectives),
     objectiveParticipationRate: totals.objectiveOpportunities ? round((totals.objectivePresent / totals.objectiveOpportunities) * 100) : null
+  };
+}
+
+function emptyMatchStatsTotals(): MatchStatsTotals {
+  return {
+    games: 0,
+    wins: 0,
+    kills: 0,
+    deaths: 0,
+    assists: 0,
+    teamKills: 0,
+    gold: 0,
+    cs: 0,
+    vision: 0,
+    minutes: 0,
+    damageToChampions: 0,
+    objectiveDamage: 0,
+    damageTaken: 0,
+    ccSeconds: 0,
+    turretTakedowns: 0,
+    wardsKilled: 0,
+    controlWards: 0
+  };
+}
+
+function valueOrZero(value?: number) {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function addMatchStats(totals: MatchStatsTotals, player: RiotParticipant, teamKills: number, minutes: number) {
+  totals.games += 1;
+  totals.wins += Number(player.win);
+  totals.kills += player.kills;
+  totals.deaths += player.deaths;
+  totals.assists += player.assists;
+  totals.teamKills += teamKills;
+  totals.gold += player.goldEarned;
+  totals.cs += player.totalMinionsKilled + player.neutralMinionsKilled;
+  totals.vision += player.visionScore;
+  totals.minutes += minutes;
+  totals.damageToChampions += valueOrZero(player.totalDamageDealtToChampions);
+  totals.objectiveDamage += valueOrZero(player.damageDealtToObjectives);
+  totals.damageTaken += valueOrZero(player.totalDamageTaken);
+  totals.ccSeconds += valueOrZero(player.timeCCingOthers);
+  totals.turretTakedowns += valueOrZero(player.turretTakedowns);
+  totals.wardsKilled += valueOrZero(player.wardsKilled);
+  totals.controlWards += valueOrZero(player.visionWardsBoughtInGame);
+}
+
+function individualMatchStats(totals: MatchStatsTotals): IndividualMatchStats {
+  const perGame = (value: number) => round(value / Math.max(totals.games, 1), 2);
+  const perMinute = (value: number) => round(value / Math.max(totals.minutes, 1), 1);
+  return {
+    killsPerGame: perGame(totals.kills),
+    deathsPerGame: perGame(totals.deaths),
+    assistsPerGame: perGame(totals.assists),
+    killParticipation: totals.teamKills ? round(((totals.kills + totals.assists) / totals.teamKills) * 100) : null,
+    visionScorePerGame: perGame(totals.vision),
+    damageToChampionsPerMinute: perMinute(totals.damageToChampions),
+    objectiveDamagePerMinute: perMinute(totals.objectiveDamage),
+    damageTakenPerMinute: perMinute(totals.damageTaken),
+    ccSecondsPerMinute: perMinute(totals.ccSeconds),
+    turretTakedownsPerGame: perGame(totals.turretTakedowns),
+    wardsKilledPerGame: perGame(totals.wardsKilled),
+    controlWardsPerGame: perGame(totals.controlWards)
   };
 }
 
@@ -795,15 +907,7 @@ export function analyzeTeamMatches(
   const summary = summarizeTeamMatches(matches);
   const playerTotals = new Map<string, {
     player: RiotParticipant;
-    games: number;
-    wins: number;
-    kills: number;
-    deaths: number;
-    assists: number;
-    gold: number;
-    cs: number;
-    vision: number;
-    minutes: number;
+    stats: MatchStatsTotals;
     timeline: TimelineTotals;
   }>();
   const championTotals = new Map<string, {
@@ -819,15 +923,7 @@ export function analyzeTeamMatches(
   const playerRoleTotals = new Map<string, {
     playerPuuid: string;
     role: Role;
-    games: number;
-    wins: number;
-    kills: number;
-    deaths: number;
-    assists: number;
-    gold: number;
-    cs: number;
-    vision: number;
-    minutes: number;
+    stats: MatchStatsTotals;
     timeline: TimelineTotals;
   }>();
 
@@ -863,27 +959,11 @@ export function analyzeTeamMatches(
     for (const player of match.teamParticipants) {
       const existingPlayer = playerTotals.get(player.puuid) ?? {
         player,
-        games: 0,
-        wins: 0,
-        kills: 0,
-        deaths: 0,
-        assists: 0,
-        gold: 0,
-        cs: 0,
-        vision: 0,
-        minutes: 0,
+        stats: emptyMatchStatsTotals(),
         timeline: emptyTimelineTotals()
       };
       existingPlayer.player = player;
-      existingPlayer.games += 1;
-      existingPlayer.wins += Number(player.win);
-      existingPlayer.kills += player.kills;
-      existingPlayer.deaths += player.deaths;
-      existingPlayer.assists += player.assists;
-      existingPlayer.gold += player.goldEarned;
-      existingPlayer.cs += player.totalMinionsKilled + player.neutralMinionsKilled;
-      existingPlayer.vision += player.visionScore;
-      existingPlayer.minutes += minutes;
+      addMatchStats(existingPlayer.stats, player, match.teamKills, minutes);
       const metric = timelineResult?.players.get(player.puuid);
       if (metric) addTimelineMetric(existingPlayer.timeline, metric);
       playerTotals.set(player.puuid, existingPlayer);
@@ -893,26 +973,10 @@ export function analyzeTeamMatches(
       const existingPlayerRole = playerRoleTotals.get(playerRoleKey) ?? {
         playerPuuid: player.puuid,
         role,
-        games: 0,
-        wins: 0,
-        kills: 0,
-        deaths: 0,
-        assists: 0,
-        gold: 0,
-        cs: 0,
-        vision: 0,
-        minutes: 0,
+        stats: emptyMatchStatsTotals(),
         timeline: emptyTimelineTotals()
       };
-      existingPlayerRole.games += 1;
-      existingPlayerRole.wins += Number(player.win);
-      existingPlayerRole.kills += player.kills;
-      existingPlayerRole.deaths += player.deaths;
-      existingPlayerRole.assists += player.assists;
-      existingPlayerRole.gold += player.goldEarned;
-      existingPlayerRole.cs += player.totalMinionsKilled + player.neutralMinionsKilled;
-      existingPlayerRole.vision += player.visionScore;
-      existingPlayerRole.minutes += minutes;
+      addMatchStats(existingPlayerRole.stats, player, match.teamKills, minutes);
       if (metric) addTimelineMetric(existingPlayerRole.timeline, metric);
       playerRoleTotals.set(playerRoleKey, existingPlayerRole);
 
@@ -946,15 +1010,16 @@ export function analyzeTeamMatches(
   } : emptyTimelineSummary();
 
   const playerRoles = [...playerRoleTotals.values()]
-    .map(({ playerPuuid, role, games, wins, kills, deaths, assists, gold, cs, vision, minutes, timeline: timelineTotals }) => ({
+    .map(({ playerPuuid, role, stats, timeline: timelineTotals }) => ({
       playerPuuid,
       role,
-      games,
-      winRate: round((wins / games) * 100),
-      kda: round((kills + assists) / Math.max(deaths, 1)),
-      goldPerMinute: Math.round(gold / minutes),
-      csPerMinute: round(cs / minutes),
-      visionPerMinute: round(vision / minutes, 2),
+      games: stats.games,
+      winRate: round((stats.wins / stats.games) * 100),
+      kda: round((stats.kills + stats.assists) / Math.max(stats.deaths, 1)),
+      goldPerMinute: Math.round(stats.gold / stats.minutes),
+      csPerMinute: round(stats.cs / stats.minutes),
+      visionPerMinute: round(stats.vision / stats.minutes, 2),
+      matchStats: individualMatchStats(stats),
       timeline: timelinePlayerStats(timelineTotals)
     }))
     .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
@@ -964,17 +1029,18 @@ export function analyzeTeamMatches(
   }
 
   const players = [...playerTotals.values()]
-    .map(({ player, games, wins, kills, deaths, assists, gold, cs, vision, minutes, timeline: timelineTotals }) => ({
+    .map(({ player, stats, timeline: timelineTotals }) => ({
       puuid: player.puuid,
       displayName: displayName(player),
       riotId: riotId(player),
       role: dominantRoleByPlayer.get(player.puuid) ?? "FILL",
-      games,
-      winRate: round((wins / games) * 100),
-      kda: round((kills + assists) / Math.max(deaths, 1)),
-      goldPerMinute: Math.round(gold / minutes),
-      csPerMinute: round(cs / minutes),
-      visionPerMinute: round(vision / minutes, 2),
+      games: stats.games,
+      winRate: round((stats.wins / stats.games) * 100),
+      kda: round((stats.kills + stats.assists) / Math.max(stats.deaths, 1)),
+      goldPerMinute: Math.round(stats.gold / stats.minutes),
+      csPerMinute: round(stats.cs / stats.minutes),
+      visionPerMinute: round(stats.vision / stats.minutes, 2),
+      matchStats: individualMatchStats(stats),
       timeline: timelinePlayerStats(timelineTotals)
     }))
     .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
