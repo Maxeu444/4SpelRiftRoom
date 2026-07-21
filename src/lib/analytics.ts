@@ -329,8 +329,9 @@ const timelineWindowLabels = {
 } as const;
 
 // Les événements WARD_PLACED de Match-V5 donnent le créateur et l'horodatage,
-// mais leur position n'est pas systématiquement disponible. La préparation se
-// mesure donc par une ward du roster posée avant la prise de l'objectif.
+// mais leur position n'est pas systématiquement disponible. Pour estimer leur
+// emplacement, on utilise la position du poseur sur la frame Timeline la plus
+// proche. La préparation reste mesurée dans une fenêtre temporelle explicite.
 const objectiveWardWindowMs = 90_000;
 
 const engageChampions = new Set([
@@ -612,7 +613,13 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
   }
 
   const objectives = events.filter((event) => event.type === "ELITE_MONSTER_KILL" && objectiveLabel(event));
-  const wardEvents = events.filter((event) => event.type === "WARD_PLACED" && event.creatorId && playerByParticipantId.has(event.creatorId));
+  const wardEvents = events
+    .filter((event) => event.type === "WARD_PLACED" && event.creatorId && playerByParticipantId.has(event.creatorId))
+    .map((ward) => {
+      const player = playerByParticipantId.get(ward.creatorId!);
+      const snapshotPosition = player?.participantId ? participantFrame(closestFrame(frames, ward.timestamp), player.participantId)?.position : undefined;
+      return { ...ward, position: ward.position ?? snapshotPosition, positionIsEstimated: !ward.position && Boolean(snapshotPosition) };
+    });
   for (const ward of wardEvents) {
     const player = playerByParticipantId.get(ward.creatorId!);
     if (player) metrics.get(player.puuid)!.wards += 1;
@@ -637,7 +644,9 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
       const teammateDistance = distance(victimPosition, teammatePosition);
       return teammateDistance !== null && teammateDistance <= 2_500;
     });
-    const wardPositionsAvailable = wardEvents.some((ward) => Boolean(ward.position));
+    // Ne pas utiliser une position estimée pour déclarer une mort « couverte » :
+    // l'incertitude est acceptable en coaching objectif, pas pour juger une mort.
+    const wardPositionsAvailable = wardEvents.some((ward) => Boolean(ward.position) && !ward.positionIsEstimated);
     const nearbyWard = !wardPositionsAvailable || wardEvents.some((ward) => {
       if (ward.timestamp < event.timestamp - objectiveWardWindowMs || ward.timestamp > event.timestamp) return false;
       const wardDistance = distance(victimPosition, ward.position);
@@ -662,8 +671,16 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
     if (!objective.position) continue;
     const frame = closestFrame(frames, objective.timestamp);
     const wardsBeforeObjective = wardEvents.filter((ward) => ward.timestamp >= objective.timestamp - objectiveWardWindowMs && ward.timestamp <= objective.timestamp);
-    if (wardsBeforeObjective.length) objectivesWithVision += 1;
-    for (const ward of wardsBeforeObjective) {
+    const estimatedNearbyWards = wardsBeforeObjective.filter((ward) => {
+      const wardDistance = distance(ward.position, objective.position);
+      return wardDistance !== null && wardDistance <= 2_500;
+    });
+    // En l'absence d'une position exploitable, la pose dans la fenêtre reste un
+    // signal de préparation ; lorsqu'une position est estimée, on la resserre
+    // autour du point de mort de l'objectif.
+    const creditedObjectiveWards = estimatedNearbyWards.length ? estimatedNearbyWards : wardsBeforeObjective;
+    if (creditedObjectiveWards.length) objectivesWithVision += 1;
+    for (const ward of creditedObjectiveWards) {
       const player = playerByParticipantId.get(ward.creatorId!);
       if (!player) continue;
       const wardKey = `${player.puuid}:${ward.timestamp}`;
@@ -701,11 +718,11 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
         teamWon: Boolean(match.teamParticipants[0]?.win),
         objective: label,
         gameTimestampSeconds: Math.round(objective.timestamp / 1_000),
-        wardsBefore: wardsBeforeObjective.length,
+        wardsBefore: creditedObjectiveWards.length,
         presentPlayers,
         rosterPlayers: playerByParticipantId.size,
         deathsBefore,
-        ready: wardsBeforeObjective.length > 0 && presentPlayers >= requiredPresence && deathsBefore === 0
+        ready: creditedObjectiveWards.length > 0 && presentPlayers >= requiredPresence && deathsBefore === 0
       });
     }
   }
