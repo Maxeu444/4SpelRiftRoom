@@ -1,5 +1,6 @@
 import { analyzeTeamMatches, findTeamMatches } from "@/lib/analytics";
-import { asRegionalRouting, getMatch, getMatchIds, resolveRiotAccount } from "@/lib/riot";
+import { getChampionNamesById } from "@/lib/data-dragon";
+import { asRegionalRouting, getMatch, getMatchIds, getMatchTimeline, resolveRiotAccount } from "@/lib/riot";
 
 export const runtime = "nodejs";
 
@@ -45,12 +46,20 @@ export async function POST(request: Request) {
 
     const rawMatches = await Promise.all(sharedMatchIds.map((matchId) => getMatch(regionalRouting, matchId)));
     const matches = findTeamMatches(rawMatches, new Set(accounts.map((account) => account.puuid)), minTeammates);
+    const timelineResults = await Promise.allSettled(matches.map(async (match) => [match.id, await getMatchTimeline(regionalRouting, match.id)] as const));
+    const timelines = new Map(timelineResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+    const championNames = await getChampionNamesById();
 
     return Response.json({
       roster: accounts.map(({ puuid, gameName, tagLine }) => ({ puuid, gameName, tagLine })),
       matches,
-      analysis: analyzeTeamMatches(matches),
-      scanned: { requestedMatchesPerPlayer: matchCount, candidateMatches: sharedMatchIds.length, retainedMatches: matches.length }
+      analysis: analyzeTeamMatches(matches, timelines, championNames, accounts.length),
+      scanned: {
+        requestedMatchesPerPlayer: matchCount,
+        candidateMatches: sharedMatchIds.length,
+        retainedMatches: matches.length,
+        retainedTimelines: timelines.size
+      }
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "La synchronisation a échoué.";
