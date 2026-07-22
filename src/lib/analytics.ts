@@ -260,6 +260,29 @@ export type ObjectiveSetupAnalysis = {
   recentObjectives: ObjectiveSetupEvent[];
 };
 
+export type IndividualAnalysis = {
+  players: PlayerAnalysis[];
+  playerRoles: PlayerRoleAnalysis[];
+  champions: ChampionAnalysis[];
+};
+
+export type DuoPairAnalysis = {
+  playerPuuids: [string, string];
+  playerNames: [string, string];
+  games: number;
+  wins: number;
+  winRate: number;
+  averageDurationMinutes: number;
+};
+
+export type DuoAnalysis = {
+  summary: TeamSummary | null;
+  players: PlayerAnalysis[];
+  playerRoles: PlayerRoleAnalysis[];
+  champions: ChampionAnalysis[];
+  pairs: DuoPairAnalysis[];
+};
+
 export type TeamAnalysis = {
   summary: TeamSummary | null;
   players: PlayerAnalysis[];
@@ -271,6 +294,8 @@ export type TeamAnalysis = {
   draft: DraftAnalysis;
   sessionReview: SessionReview | null;
   insights: CoachingInsight[];
+  individual?: IndividualAnalysis;
+  duo?: DuoAnalysis;
 };
 
 type TimelineTotals = {
@@ -507,6 +532,25 @@ function timelinePlayerStats(totals: TimelineTotals): TimelinePlayerStats {
     wardsPerGame: perGame(totals.wards),
     wardsBeforeObjectivesPerGame: perGame(totals.wardsBeforeObjectives),
     objectiveParticipationRate: totals.objectiveOpportunities ? round((totals.objectivePresent / totals.objectiveOpportunities) * 100) : null
+  };
+}
+
+export function findDuoMatches(matches: RiotMatch[], teamPuuids: Set<string>): SyncedMatch[] {
+  return findTeamMatches(matches, teamPuuids, 2).filter((match) => match.teamParticipants.length === 2);
+}
+
+function emptyTimelinePlayerStats(): TimelinePlayerStats {
+  return {
+    timelineGames: 0,
+    deathsPerGame: null,
+    riskyDeathsPerGame: null,
+    laneCsAt10: null,
+    laneCsAt15: null,
+    farmAt10: null,
+    farmAt15: null,
+    wardsPerGame: null,
+    wardsBeforeObjectivesPerGame: null,
+    objectiveParticipationRate: null
   };
 }
 
@@ -1165,6 +1209,121 @@ export function analyzeTeamMatches(
   const sessionReview = priority ? { title: priority.title, evidence: priority.detail, nextAction: priority.action } : null;
 
   return { summary, players, playerRoles, champions, timeline, objectiveSetup: toObjectiveSetupAnalysis(timeline), milestones, draft, sessionReview, insights };
+}
+
+export function analyzeIndividualMatches(rawMatches: RiotMatch[], rosterPuuids: Set<string>, teamAnalysis: TeamAnalysis): IndividualAnalysis {
+  const playerTotals = new Map<string, { player: RiotParticipant; stats: MatchStatsTotals }>();
+  const playerRoleTotals = new Map<string, { playerPuuid: string; role: Role; stats: MatchStatsTotals }>();
+  const championTotals = new Map<string, { playerPuuid: string; champion: string; role: Role; games: number; wins: number; kills: number; deaths: number; assists: number }>();
+
+  for (const match of rawMatches) {
+    const minutes = Math.max(match.info.gameDuration / 60, 1);
+    for (const player of match.info.participants) {
+      if (!rosterPuuids.has(player.puuid)) continue;
+      const teamKills = match.info.participants.filter((participant) => participant.teamId === player.teamId).reduce((total, participant) => total + participant.kills, 0);
+      const playerTotal = playerTotals.get(player.puuid) ?? { player, stats: emptyMatchStatsTotals() };
+      playerTotal.player = player;
+      addMatchStats(playerTotal.stats, player, teamKills, minutes);
+      playerTotals.set(player.puuid, playerTotal);
+
+      const role = normalizeRole(player.teamPosition ?? player.individualPosition);
+      const playerRoleKey = `${player.puuid}:${role}`;
+      const roleTotal = playerRoleTotals.get(playerRoleKey) ?? { playerPuuid: player.puuid, role, stats: emptyMatchStatsTotals() };
+      addMatchStats(roleTotal.stats, player, teamKills, minutes);
+      playerRoleTotals.set(playerRoleKey, roleTotal);
+
+      const championKey = `${player.puuid}:${role}:${player.championName}`;
+      const championTotal = championTotals.get(championKey) ?? { playerPuuid: player.puuid, champion: player.championName, role, games: 0, wins: 0, kills: 0, deaths: 0, assists: 0 };
+      championTotal.games += 1;
+      championTotal.wins += Number(player.win);
+      championTotal.kills += player.kills;
+      championTotal.deaths += player.deaths;
+      championTotal.assists += player.assists;
+      championTotals.set(championKey, championTotal);
+    }
+  }
+
+  const timelineByPlayer = new Map(teamAnalysis.players.map((player) => [player.puuid, player.timeline]));
+  const timelineByPlayerRole = new Map(teamAnalysis.playerRoles.map((player) => [`${player.playerPuuid}:${player.role}`, player.timeline]));
+  const playerRoles = [...playerRoleTotals.values()]
+    .map(({ playerPuuid, role, stats }) => ({
+      playerPuuid,
+      role,
+      games: stats.games,
+      winRate: round((stats.wins / stats.games) * 100),
+      kda: round((stats.kills + stats.assists) / Math.max(stats.deaths, 1)),
+      goldPerMinute: Math.round(stats.gold / stats.minutes),
+      csPerMinute: round(stats.cs / stats.minutes),
+      visionPerMinute: round(stats.vision / stats.minutes, 2),
+      matchStats: individualMatchStats(stats),
+      timeline: timelineByPlayerRole.get(`${playerPuuid}:${role}`) ?? emptyTimelinePlayerStats()
+    }))
+    .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
+  const dominantRoleByPlayer = new Map<string, Role>();
+  for (const playerRole of playerRoles) {
+    if (!dominantRoleByPlayer.has(playerRole.playerPuuid)) dominantRoleByPlayer.set(playerRole.playerPuuid, playerRole.role);
+  }
+
+  const players = [...playerTotals.values()]
+    .map(({ player, stats }) => ({
+      puuid: player.puuid,
+      displayName: displayName(player),
+      riotId: riotId(player),
+      role: dominantRoleByPlayer.get(player.puuid) ?? "FILL",
+      games: stats.games,
+      winRate: round((stats.wins / stats.games) * 100),
+      kda: round((stats.kills + stats.assists) / Math.max(stats.deaths, 1)),
+      goldPerMinute: Math.round(stats.gold / stats.minutes),
+      csPerMinute: round(stats.cs / stats.minutes),
+      visionPerMinute: round(stats.vision / stats.minutes, 2),
+      matchStats: individualMatchStats(stats),
+      timeline: timelineByPlayer.get(player.puuid) ?? emptyTimelinePlayerStats()
+    }))
+    .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
+  const champions = [...championTotals.values()]
+    .map(({ playerPuuid, champion, role, games, wins, kills, deaths, assists }) => ({
+      playerPuuid,
+      champion,
+      role,
+      games,
+      winRate: round((wins / games) * 100),
+      kda: round((kills + assists) / Math.max(deaths, 1))
+    }))
+    .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
+
+  return { players, playerRoles, champions };
+}
+
+export function analyzeDuoMatches(matches: SyncedMatch[], championNames: Record<number, string> = {}): DuoAnalysis {
+  const analysis = analyzeTeamMatches(matches, new Map(), championNames, 2);
+  const pairTotals = new Map<string, { playerPuuids: [string, string]; playerNames: [string, string]; games: number; wins: number; durationSeconds: number }>();
+  for (const match of matches) {
+    const pair = [...match.teamParticipants].sort((left, right) => left.puuid.localeCompare(right.puuid));
+    if (pair.length !== 2) continue;
+    const key = `${pair[0]!.puuid}:${pair[1]!.puuid}`;
+    const total = pairTotals.get(key) ?? {
+      playerPuuids: [pair[0]!.puuid, pair[1]!.puuid],
+      playerNames: [displayName(pair[0]!), displayName(pair[1]!)],
+      games: 0,
+      wins: 0,
+      durationSeconds: 0
+    };
+    total.games += 1;
+    total.wins += Number(pair[0]!.win);
+    total.durationSeconds += match.gameDurationSeconds;
+    pairTotals.set(key, total);
+  }
+  const pairs = [...pairTotals.values()]
+    .map((pair) => ({
+      playerPuuids: pair.playerPuuids,
+      playerNames: pair.playerNames,
+      games: pair.games,
+      wins: pair.wins,
+      winRate: round((pair.wins / pair.games) * 100),
+      averageDurationMinutes: round(pair.durationSeconds / pair.games / 60)
+    }))
+    .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
+  return { summary: analysis.summary, players: analysis.players, playerRoles: analysis.playerRoles, champions: analysis.champions, pairs };
 }
 
 export { timelineWindowLabels };

@@ -35,8 +35,8 @@ export async function POST(request: Request) {
       return Response.json({ error: "DATABASE_URL est absente. Ajoutez la variable PostgreSQL Railway avant de synchroniser." }, { status: 503 });
     }
     const body = (await request.json()) as ScanRequest;
-    if (!Array.isArray(body.players) || body.players.length < 3 || body.players.length > 5 || !body.players.every(isScanPlayer)) {
-      return Response.json({ error: "Indiquez entre 3 et 5 Riot ID au format { gameName, tagLine }." }, { status: 400 });
+    if (!Array.isArray(body.players) || body.players.length < 2 || body.players.length > 5 || !body.players.every(isScanPlayer)) {
+      return Response.json({ error: "Indiquez entre 2 et 5 Riot ID au format { gameName, tagLine }." }, { status: 400 });
     }
 
     return Response.json(await withSynchronizationLock(() => synchronizeTeam(body)));
