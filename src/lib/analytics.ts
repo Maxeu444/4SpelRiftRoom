@@ -86,6 +86,7 @@ export type SyncedMatch = {
   playedAt?: number;
   gameStartedAt?: number;
   teamParticipants: RiotParticipant[];
+  opponentParticipants: RiotParticipant[];
   teamKills: number;
   opponentBans: number[];
 };
@@ -359,6 +360,7 @@ export function findTeamMatches(matches: RiotMatch[], teamPuuids: Set<string>, m
     const teamParticipants = [...bySide.values()].sort((left, right) => right.length - left.length)[0] ?? [];
     if (teamParticipants.length < minimumPlayers) return [];
     const teamId = teamParticipants[0]?.teamId;
+    const opponentParticipants = match.info.participants.filter((participant) => participant.teamId !== teamId);
     const teamKills = match.info.participants.filter((participant) => participant.teamId === teamId).reduce((total, participant) => total + participant.kills, 0);
     const opponentBans = match.info.teams
       ?.find((team) => team.teamId !== teamId)
@@ -371,6 +373,7 @@ export function findTeamMatches(matches: RiotMatch[], teamPuuids: Set<string>, m
       playedAt: match.info.gameEndTimestamp,
       gameStartedAt: match.info.gameStartTimestamp ?? (match.info.gameEndTimestamp ? match.info.gameEndTimestamp - match.info.gameDuration * 1_000 : undefined),
       teamParticipants,
+      opponentParticipants,
       teamKills,
       opponentBans
     }];
