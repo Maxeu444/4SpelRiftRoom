@@ -1,0 +1,7 @@
+[build]
+builder = "RAILPACK"
+
+[deploy]
+startCommand = "node scripts/daily-sync.mjs"
+cronSchedule = "0 5,6 * * *"
+restartPolicyType = "NEVER"
