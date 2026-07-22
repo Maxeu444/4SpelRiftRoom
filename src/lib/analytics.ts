@@ -176,6 +176,22 @@ export type TeamTimelineSummary = {
   fullRosterPresenceRate: number | null;
   averageRosterPresenceRate: number | null;
   objectiveSetups: ObjectiveSetup[];
+  mapEvents: MapReviewEvent[];
+};
+
+export type MapReviewEventType = "objective" | "ward" | "death" | "kill";
+
+export type MapReviewEvent = {
+  id: string;
+  matchId: string;
+  gameStartedAt?: number;
+  gameDurationSeconds: number;
+  teamWon: boolean;
+  timestampSeconds: number;
+  type: MapReviewEventType;
+  label: string;
+  detail: string;
+  position: RiotPosition;
 };
 
 export type ObjectiveSetup = {
@@ -320,6 +336,7 @@ type MatchTimelineResult = {
   rosterSlotsPresent: number;
   rosterSlotsPossible: number;
   objectiveSetups: ObjectiveSetup[];
+  mapEvents: MapReviewEvent[];
 };
 
 const timelineWindowLabels = {
@@ -582,6 +599,14 @@ function objectiveLabel(event: RiotTimelineEvent) {
   return null;
 }
 
+function hasMapPosition(position?: RiotPosition): position is RiotPosition {
+  return Boolean(position && Number.isFinite(position.x) && Number.isFinite(position.y) && position.x >= 0 && position.x <= 15_000 && position.y >= 0 && position.y <= 15_000);
+}
+
+function timelinePlayerName(player?: RiotParticipant) {
+  return player?.riotIdGameName || player?.summonerName || "4Spel";
+}
+
 function deathWindow(timestamp: number): keyof DeathWindows {
   if (timestamp < 10 * 60_000) return "early";
   if (timestamp < 20 * 60_000) return "setup";
@@ -623,9 +648,28 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
       const snapshotPosition = player?.participantId ? participantFrame(closestFrame(frames, ward.timestamp), player.participantId)?.position : undefined;
       return { ...ward, position: ward.position ?? snapshotPosition, positionIsEstimated: !ward.position && Boolean(snapshotPosition) };
     });
+  const mapEvents: MapReviewEvent[] = [];
+  const teamId = match.teamParticipants[0]?.teamId;
+  const baseMapEvent = {
+    matchId: match.id,
+    gameStartedAt: match.gameStartedAt,
+    gameDurationSeconds: match.gameDurationSeconds,
+    teamWon: Boolean(match.teamParticipants[0]?.win)
+  };
   for (const ward of wardEvents) {
     const player = playerByParticipantId.get(ward.creatorId!);
     if (player) metrics.get(player.puuid)!.wards += 1;
+    if (player && hasMapPosition(ward.position)) {
+      mapEvents.push({
+        ...baseMapEvent,
+        id: `${match.id}:ward:${ward.timestamp}:${ward.creatorId}`,
+        timestampSeconds: Math.round(ward.timestamp / 1_000),
+        type: "ward",
+        label: `Ward · ${timelinePlayerName(player)}`,
+        detail: ward.wardType ? `Ward posée (${ward.wardType})` : "Ward posée",
+        position: ward.position
+      });
+    }
   }
 
   let teamDeaths = 0;
@@ -634,31 +678,55 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
   for (const event of events) {
     if (event.type !== "CHAMPION_KILL" || !event.victimId) continue;
     const victim = playerByParticipantId.get(event.victimId);
-    if (!victim?.participantId) continue;
-    const metric = metrics.get(victim.puuid)!;
-    metric.deaths += 1;
-    teamDeaths += 1;
-    deathWindows[deathWindow(event.timestamp)] += 1;
+    const killer = event.killerId ? playerByParticipantId.get(event.killerId) : undefined;
     const frame = closestFrame(frames, event.timestamp);
-    const victimPosition = participantFrame(frame, victim.participantId)?.position;
-    const nearbyTeammate = [...playerByParticipantId.entries()].some(([participantId, player]) => {
-      if (player.puuid === victim.puuid) return false;
-      const teammatePosition = participantFrame(frame, participantId)?.position;
-      const teammateDistance = distance(victimPosition, teammatePosition);
-      return teammateDistance !== null && teammateDistance <= 2_500;
-    });
-    // Ne pas utiliser une position estimée pour déclarer une mort « couverte » :
-    // l'incertitude est acceptable en coaching objectif, pas pour juger une mort.
-    const wardPositionsAvailable = wardEvents.some((ward) => Boolean(ward.position) && !ward.positionIsEstimated);
-    const nearbyWard = !wardPositionsAvailable || wardEvents.some((ward) => {
-      if (ward.timestamp < event.timestamp - objectiveWardWindowMs || ward.timestamp > event.timestamp) return false;
-      const wardDistance = distance(victimPosition, ward.position);
-      return wardDistance !== null && wardDistance <= 2_500;
-    });
-    const objectiveSoon = objectives.some((objective) => objective.timestamp >= event.timestamp && objective.timestamp <= event.timestamp + 90_000);
-    if ((!nearbyTeammate && !nearbyWard) || (!nearbyTeammate && objectiveSoon)) {
-      metric.riskyDeaths += 1;
-      riskyDeaths += 1;
+    if (victim?.participantId) {
+      const metric = metrics.get(victim.puuid)!;
+      metric.deaths += 1;
+      teamDeaths += 1;
+      deathWindows[deathWindow(event.timestamp)] += 1;
+      const victimPosition = participantFrame(frame, victim.participantId)?.position;
+      const markerPosition = event.position ?? victimPosition;
+      if (hasMapPosition(markerPosition)) {
+        mapEvents.push({
+          ...baseMapEvent,
+          id: `${match.id}:death:${event.timestamp}:${event.victimId}`,
+          timestampSeconds: Math.round(event.timestamp / 1_000),
+          type: "death",
+          label: `Mort · ${timelinePlayerName(victim)}`,
+          detail: "Mort de l'équipe",
+          position: markerPosition
+        });
+      }
+      const nearbyTeammate = [...playerByParticipantId.entries()].some(([participantId, player]) => {
+        if (player.puuid === victim.puuid) return false;
+        const teammatePosition = participantFrame(frame, participantId)?.position;
+        const teammateDistance = distance(victimPosition, teammatePosition);
+        return teammateDistance !== null && teammateDistance <= 2_500;
+      });
+      // Ne pas utiliser une position estimée pour déclarer une mort « couverte » :
+      // l'incertitude est acceptable en coaching objectif, pas pour juger une mort.
+      const wardPositionsAvailable = wardEvents.some((ward) => Boolean(ward.position) && !ward.positionIsEstimated);
+      const nearbyWard = !wardPositionsAvailable || wardEvents.some((ward) => {
+        if (ward.timestamp < event.timestamp - objectiveWardWindowMs || ward.timestamp > event.timestamp) return false;
+        const wardDistance = distance(victimPosition, ward.position);
+        return wardDistance !== null && wardDistance <= 2_500;
+      });
+      const objectiveSoon = objectives.some((objective) => objective.timestamp >= event.timestamp && objective.timestamp <= event.timestamp + 90_000);
+      if ((!nearbyTeammate && !nearbyWard) || (!nearbyTeammate && objectiveSoon)) {
+        metric.riskyDeaths += 1;
+        riskyDeaths += 1;
+      }
+    } else if (killer && hasMapPosition(event.position)) {
+      mapEvents.push({
+        ...baseMapEvent,
+        id: `${match.id}:kill:${event.timestamp}:${event.killerId}`,
+        timestampSeconds: Math.round(event.timestamp / 1_000),
+        type: "kill",
+        label: `Kill · ${timelinePlayerName(killer)}`,
+        detail: "Élimination de l'équipe",
+        position: event.position
+      });
     }
   }
 
@@ -669,7 +737,6 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
   let rosterSlotsPossible = 0;
   const objectiveSetups: ObjectiveSetup[] = [];
   const creditedWards = new Set<string>();
-  const teamId = match.teamParticipants[0]?.teamId;
   for (const objective of objectives) {
     if (!objective.position) continue;
     const frame = closestFrame(frames, objective.timestamp);
@@ -709,10 +776,20 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
       }
     }
     if (positionedPlayers === playerByParticipantId.size && presentPlayers === playerByParticipantId.size) objectivesWithFullRoster += 1;
-    if (objective.killerTeamId === teamId || (objective.killerId && playerByParticipantId.has(objective.killerId))) objectivesSecured += 1;
+    const securedByTeam = objective.killerTeamId === teamId || (objective.killerId && playerByParticipantId.has(objective.killerId));
+    if (securedByTeam) objectivesSecured += 1;
     const deathsBefore = events.filter((event) => event.type === "CHAMPION_KILL" && event.victimId && playerByParticipantId.has(event.victimId) && event.timestamp >= objective.timestamp - 60_000 && event.timestamp <= objective.timestamp).length;
     const label = objectiveLabel(objective);
     if (label) {
+      mapEvents.push({
+        ...baseMapEvent,
+        id: `${match.id}:objective:${objective.timestamp}:${objective.monsterType}`,
+        timestampSeconds: Math.round(objective.timestamp / 1_000),
+        type: "objective",
+        label,
+        detail: securedByTeam ? "Objectif sécurisé par 4Spel" : "Objectif sécurisé par l'adversaire",
+        position: objective.position
+      });
       const requiredPresence = Math.min(4, playerByParticipantId.size);
       objectiveSetups.push({
         matchId: match.id,
@@ -741,7 +818,8 @@ function computeMatchTimeline(match: SyncedMatch, timeline: RiotMatchTimeline): 
     objectivesWithFullRoster,
     rosterSlotsPresent,
     rosterSlotsPossible,
-    objectiveSetups
+    objectiveSetups,
+    mapEvents
   };
 }
 
@@ -894,7 +972,8 @@ function emptyTimelineSummary(): TeamTimelineSummary {
     objectiveVisionRate: null,
     fullRosterPresenceRate: null,
     averageRosterPresenceRate: null,
-    objectiveSetups: []
+    objectiveSetups: [],
+    mapEvents: []
   };
 }
 
@@ -960,6 +1039,7 @@ export function analyzeTeamMatches(
   let rosterSlotsPresent = 0;
   let rosterSlotsPossible = 0;
   const objectiveSetups: ObjectiveSetup[] = [];
+  const mapEvents: MapReviewEvent[] = [];
 
   for (const match of matches) {
     const minutes = Math.max(match.gameDurationSeconds / 60, 1);
@@ -977,6 +1057,7 @@ export function analyzeTeamMatches(
       rosterSlotsPresent += timelineResult.rosterSlotsPresent;
       rosterSlotsPossible += timelineResult.rosterSlotsPossible;
       objectiveSetups.push(...timelineResult.objectiveSetups);
+      mapEvents.push(...timelineResult.mapEvents);
     }
     for (const player of match.teamParticipants) {
       const existingPlayer = playerTotals.get(player.puuid) ?? {
@@ -1028,7 +1109,8 @@ export function analyzeTeamMatches(
     objectiveVisionRate: objectivesObserved ? round((objectivesWithVision / objectivesObserved) * 100) : null,
     fullRosterPresenceRate: objectivesObserved ? round((objectivesWithFullRoster / objectivesObserved) * 100) : null,
     averageRosterPresenceRate: rosterSlotsPossible ? round((rosterSlotsPresent / rosterSlotsPossible) * 100) : null,
-    objectiveSetups: objectiveSetups.sort((left, right) => (right.gameStartedAt ?? 0) - (left.gameStartedAt ?? 0) || left.gameTimestampSeconds - right.gameTimestampSeconds)
+    objectiveSetups: objectiveSetups.sort((left, right) => (right.gameStartedAt ?? 0) - (left.gameStartedAt ?? 0) || left.gameTimestampSeconds - right.gameTimestampSeconds),
+    mapEvents: mapEvents.sort((left, right) => (right.gameStartedAt ?? 0) - (left.gameStartedAt ?? 0) || left.timestampSeconds - right.timestampSeconds)
   } : emptyTimelineSummary();
 
   const playerRoles = [...playerRoleTotals.values()]
