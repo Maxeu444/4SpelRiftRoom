@@ -269,10 +269,27 @@ export type IndividualAnalysis = {
 export type DuoPairAnalysis = {
   playerPuuids: [string, string];
   playerNames: [string, string];
+  roles: [Role, Role];
+  lane: string;
   games: number;
   wins: number;
   winRate: number;
   averageDurationMinutes: number;
+  combinedKda: number;
+  killParticipation: number | null;
+  damagePerMinute: number;
+  objectiveDamagePerMinute: number;
+  visionPerMinute: number;
+  controlWardsPerGame: number;
+  turretTakedownsPerGame: number;
+  contextualMetrics: DuoContextualMetric[];
+};
+
+export type DuoContextualMetric = {
+  label: string;
+  value: number;
+  unit: string;
+  detail: string;
 };
 
 export type DuoAnalysis = {
@@ -1294,9 +1311,86 @@ export function analyzeIndividualMatches(rawMatches: RiotMatch[], rosterPuuids: 
   return { players, playerRoles, champions };
 }
 
+type DuoRoleTotals = {
+  games: number;
+  minutes: number;
+  laneCs: number;
+  jungleCs: number;
+  vision: number;
+};
+
+type DuoPairTotals = {
+  playerPuuids: [string, string];
+  playerNames: [string, string];
+  games: number;
+  wins: number;
+  durationSeconds: number;
+  kills: number;
+  deaths: number;
+  assists: number;
+  teamKills: number;
+  damage: number;
+  objectiveDamage: number;
+  vision: number;
+  controlWards: number;
+  turretTakedowns: number;
+  roleCombinations: Map<string, number>;
+  roleTotals: Map<Role, DuoRoleTotals>;
+};
+
+const duoRoleOrder: Role[] = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY", "FILL"];
+
+function duoRolesFromKey(key: string): [Role, Role] {
+  const roles = key.split(":") as Role[];
+  return [roles[0] ?? "FILL", roles[1] ?? "FILL"];
+}
+
+function duoLaneLabel(roles: [Role, Role]) {
+  const [first, second] = roles;
+  const has = (role: Role) => first === role || second === role;
+  if (has("BOTTOM") && has("UTILITY")) return "Botlane · ADC + Support";
+  if (has("TOP") && has("JUNGLE")) return "Topside · Top + Jungle";
+  if (has("MIDDLE") && has("JUNGLE")) return "Mid/Jungle · tempo & roaming";
+  return `${first === "FILL" ? "Flex" : first} + ${second === "FILL" ? "Flex" : second}`;
+}
+
+function duoContextualMetrics(pair: DuoPairTotals, roles: [Role, Role]): DuoContextualMetric[] {
+  const minutes = Math.max(pair.durationSeconds / 60, 1);
+  const byRole = (role: Role) => pair.roleTotals.get(role);
+  const rolePerMinute = (role: Role, metric: "laneCs" | "jungleCs" | "vision") => {
+    const totals = byRole(role);
+    return totals ? round(totals[metric] / Math.max(totals.minutes, 1), 2) : 0;
+  };
+  const has = (role: Role) => roles.includes(role);
+  const objectiveDamagePerMinute = round(pair.objectiveDamage / minutes);
+  const damagePerMinute = round(pair.damage / minutes);
+  const killParticipation = pair.teamKills ? round(((pair.kills + pair.assists) / pair.teamKills) * 100) : 0;
+
+  if (has("BOTTOM") && has("UTILITY")) return [
+    { label: "Farm ADC", value: rolePerMinute("BOTTOM", "laneCs"), unit: " CS/min", detail: "CS du joueur Bottom" },
+    { label: "Vision Support", value: rolePerMinute("UTILITY", "vision"), unit: " / min", detail: "score de vision du Support" },
+    { label: "Pression tours", value: round(pair.turretTakedowns / pair.games, 1), unit: " / game", detail: "tours prises par le duo" }
+  ];
+  if (has("TOP") && has("JUNGLE")) return [
+    { label: "Farm Top", value: rolePerMinute("TOP", "laneCs"), unit: " CS/min", detail: "CS du joueur Top" },
+    { label: "Farm Jungle", value: rolePerMinute("JUNGLE", "jungleCs"), unit: " CS jungle/min", detail: "monstres du Jungler" },
+    { label: "Dégâts objectifs", value: objectiveDamagePerMinute, unit: " / min", detail: "pression Topside cumulée" }
+  ];
+  if (has("MIDDLE") && has("JUNGLE")) return [
+    { label: "Farm Mid", value: rolePerMinute("MIDDLE", "laneCs"), unit: " CS/min", detail: "CS du joueur Mid" },
+    { label: "Farm Jungle", value: rolePerMinute("JUNGLE", "jungleCs"), unit: " CS jungle/min", detail: "monstres du Jungler" },
+    { label: "Pression combat", value: damagePerMinute, unit: " dégâts/min", detail: "dégâts champions cumulés" }
+  ];
+  return [
+    { label: "Implication kills", value: killParticipation, unit: " %", detail: "kills + assists du duo" },
+    { label: "Dégâts objectifs", value: objectiveDamagePerMinute, unit: " / min", detail: "dégâts cumulés aux objectifs" },
+    { label: "Vision cumulée", value: round(pair.vision / minutes, 2), unit: " / min", detail: "score de vision des deux joueurs" }
+  ];
+}
+
 export function analyzeDuoMatches(matches: SyncedMatch[], championNames: Record<number, string> = {}): DuoAnalysis {
   const analysis = analyzeTeamMatches(matches, new Map(), championNames, 2);
-  const pairTotals = new Map<string, { playerPuuids: [string, string]; playerNames: [string, string]; games: number; wins: number; durationSeconds: number }>();
+  const pairTotals = new Map<string, DuoPairTotals>();
   for (const match of matches) {
     const pair = [...match.teamParticipants].sort((left, right) => left.puuid.localeCompare(right.puuid));
     if (pair.length !== 2) continue;
@@ -1306,22 +1400,74 @@ export function analyzeDuoMatches(matches: SyncedMatch[], championNames: Record<
       playerNames: [displayName(pair[0]!), displayName(pair[1]!)],
       games: 0,
       wins: 0,
-      durationSeconds: 0
+      durationSeconds: 0,
+      kills: 0,
+      deaths: 0,
+      assists: 0,
+      teamKills: 0,
+      damage: 0,
+      objectiveDamage: 0,
+      vision: 0,
+      controlWards: 0,
+      turretTakedowns: 0,
+      roleCombinations: new Map(),
+      roleTotals: new Map()
     };
     total.games += 1;
     total.wins += Number(pair[0]!.win);
     total.durationSeconds += match.gameDurationSeconds;
+    total.teamKills += match.teamKills;
+    const minutes = Math.max(match.gameDurationSeconds / 60, 1);
+    const roles = pair
+      .map((player) => normalizeRole(player.teamPosition ?? player.individualPosition))
+      .sort((left, right) => duoRoleOrder.indexOf(left) - duoRoleOrder.indexOf(right)) as [Role, Role];
+    const roleKey = roles.join(":");
+    total.roleCombinations.set(roleKey, (total.roleCombinations.get(roleKey) ?? 0) + 1);
+    for (const player of pair) {
+      total.kills += player.kills;
+      total.deaths += player.deaths;
+      total.assists += player.assists;
+      total.damage += player.totalDamageDealtToChampions ?? 0;
+      total.objectiveDamage += player.damageDealtToObjectives ?? 0;
+      total.vision += player.visionScore;
+      total.controlWards += player.visionWardsBoughtInGame ?? 0;
+      total.turretTakedowns += player.turretTakedowns ?? 0;
+      const role = normalizeRole(player.teamPosition ?? player.individualPosition);
+      const roleTotal = total.roleTotals.get(role) ?? { games: 0, minutes: 0, laneCs: 0, jungleCs: 0, vision: 0 };
+      roleTotal.games += 1;
+      roleTotal.minutes += minutes;
+      roleTotal.laneCs += player.totalMinionsKilled;
+      roleTotal.jungleCs += player.neutralMinionsKilled;
+      roleTotal.vision += player.visionScore;
+      total.roleTotals.set(role, roleTotal);
+    }
     pairTotals.set(key, total);
   }
   const pairs = [...pairTotals.values()]
-    .map((pair) => ({
-      playerPuuids: pair.playerPuuids,
-      playerNames: pair.playerNames,
-      games: pair.games,
-      wins: pair.wins,
-      winRate: round((pair.wins / pair.games) * 100),
-      averageDurationMinutes: round(pair.durationSeconds / pair.games / 60)
-    }))
+    .map((pair) => {
+      const roleKey = [...pair.roleCombinations.entries()]
+        .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0] ?? "FILL:FILL";
+      const roles = duoRolesFromKey(roleKey);
+      const minutes = Math.max(pair.durationSeconds / 60, 1);
+      return {
+        playerPuuids: pair.playerPuuids,
+        playerNames: pair.playerNames,
+        roles,
+        lane: duoLaneLabel(roles),
+        games: pair.games,
+        wins: pair.wins,
+        winRate: round((pair.wins / pair.games) * 100),
+        averageDurationMinutes: round(pair.durationSeconds / pair.games / 60),
+        combinedKda: round((pair.kills + pair.assists) / Math.max(pair.deaths, 1)),
+        killParticipation: pair.teamKills ? round(((pair.kills + pair.assists) / pair.teamKills) * 100) : null,
+        damagePerMinute: round(pair.damage / minutes),
+        objectiveDamagePerMinute: round(pair.objectiveDamage / minutes),
+        visionPerMinute: round(pair.vision / minutes, 2),
+        controlWardsPerGame: round(pair.controlWards / pair.games, 1),
+        turretTakedownsPerGame: round(pair.turretTakedowns / pair.games, 1),
+        contextualMetrics: duoContextualMetrics(pair, roles)
+      };
+    })
     .sort((left, right) => right.games - left.games || right.winRate - left.winRate);
   return { summary: analysis.summary, players: analysis.players, playerRoles: analysis.playerRoles, champions: analysis.champions, pairs };
 }
