@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { normalizeRole } from "@/lib/analytics";
 import type { ChampionAnalysis, ObjectiveSetup, ObjectiveSetupAnalysis, PlayerAnalysis, SyncedMatch, TeamAnalysis, TimelinePlayerStats } from "@/lib/analytics";
 import type { ScoutingReport } from "@/lib/scouting";
 import type { CoachingInsight, Role } from "@/lib/types";
@@ -24,6 +25,7 @@ type SyncRosterPlayer = { puuid: string; gameName: string; tagLine: string };
 type SyncResult = {
   roster: SyncRosterPlayer[];
   matches: SyncedMatch[];
+  championImages: Record<string, string>;
   analysis: TeamAnalysis;
   scanned: { requestedMatchesPerPlayer: number; candidateMatches: number; retainedMatches: number; retainedTimelines: number };
 };
@@ -51,6 +53,12 @@ type TeamMilestoneProgress = Record<TeamMilestoneId, boolean>;
 type ReviewDraft = { source: string; pattern: string; action: string };
 type ReviewEntry = ReviewDraft & { id: number };
 type DraftPlan = { planA: string; planB: string; notes: string };
+type MatchupRoleFilter = Role | "REFERENCE";
+
+type MatchupCell = {
+  games: number;
+  wins: number;
+};
 
 const callerDomains: { id: CallerDomain; label: string; description: string; preferredRoles: Role[] }[] = [
   { id: "macro", label: "Objectifs & tempo", description: "Décide du drake, héraut ou Baron à préparer.", preferredRoles: ["JUNGLE", "UTILITY", "MIDDLE"] },
@@ -402,6 +410,60 @@ function CoachingDashboard({ analysis, selectedId, roleAssignments, onRoleChange
   );
 }
 
+function MatchupDashboard({ result, roleAssignments, selectedPlayerId, selectedRole, onPlayerChange, onRoleChange, onSync }: { result: SyncResult | null; roleAssignments: Record<string, Role>; selectedPlayerId: string; selectedRole: MatchupRoleFilter; onPlayerChange: (playerId: string) => void; onRoleChange: (role: MatchupRoleFilter) => void; onSync: () => void }) {
+  const analysis = result?.analysis ?? null;
+  const matrix = useMemo(() => {
+    if (!analysis || !result) return { rows: [] as string[], columns: [] as string[], cells: new Map<string, MatchupCell>(), samples: 0 };
+    const selectedPlayers = analysis.players.filter((player) => !selectedPlayerId || player.puuid === selectedPlayerId);
+    const selectedPuuids = new Set(selectedPlayers.map((player) => player.puuid));
+    const referenceRoles = new Map(selectedPlayers.map((player) => [player.puuid, roleAssignments[player.puuid] ?? player.role]));
+    const rows = new Set<string>();
+    const columns = new Set<string>();
+    const cells = new Map<string, MatchupCell>();
+    let samples = 0;
+
+    for (const match of result.matches) {
+      for (const player of match.teamParticipants) {
+        if (!selectedPuuids.has(player.puuid)) continue;
+        const playedRole = normalizeRole(player.teamPosition ?? player.individualPosition);
+        const targetRole = selectedRole === "REFERENCE" ? referenceRoles.get(player.puuid) : selectedRole;
+        if (playedRole !== targetRole) continue;
+        const opponent = match.opponentParticipants.find((candidate) => normalizeRole(candidate.teamPosition ?? candidate.individualPosition) === playedRole);
+        if (!opponent) continue;
+        const key = `${player.championName}\u0000${opponent.championName}`;
+        const cell = cells.get(key) ?? { games: 0, wins: 0 };
+        cell.games += 1;
+        cell.wins += Number(player.win);
+        cells.set(key, cell);
+        rows.add(player.championName);
+        columns.add(opponent.championName);
+        samples += 1;
+      }
+    }
+
+    return {
+      rows: [...rows].sort((left, right) => left.localeCompare(right, "fr")),
+      columns: [...columns].sort((left, right) => left.localeCompare(right, "fr")),
+      cells,
+      samples
+    };
+  }, [analysis, result, roleAssignments, selectedPlayerId, selectedRole]);
+
+  if (!analysis) return <section className="panel matchup-empty"><span className="empty-mark">×</span><div><p className="eyebrow">MatchUp</p><h2>Synchronisez l'équipe pour ouvrir les matchups</h2><p>La matrice compare les champions joués par l'équipe avec les champions adverses rencontrés sur la même position.</p><button className="sync-button" type="button" onClick={onSync}>Synchroniser l'équipe</button></div></section>;
+
+  const selectedPlayer = analysis.players.find((player) => player.puuid === selectedPlayerId);
+  const championImages = result?.championImages ?? {};
+  const championBackground = (champion: string) => championImages[champion] ? { backgroundImage: `linear-gradient(120deg, #171622b3, #17162258), url("${championImages[champion]}")` } : undefined;
+  const roleDescription = selectedRole === "REFERENCE" ? (selectedPlayer ? `Rôle de référence : ${roleLabels[roleAssignments[selectedPlayer.puuid] ?? selectedPlayer.role]}` : "Chaque membre est filtré sur son rôle de référence") : roleLabels[selectedRole];
+  const gridStyle = { gridTemplateColumns: `minmax(155px, 1.25fr) repeat(${matrix.columns.length}, minmax(116px, .85fr))` };
+
+  return <section className="matchup-view">
+    <section className="matchup-hero"><div><p className="eyebrow">Lecture de lane · données Riot</p><h2>MatchUp</h2><p>Pour chaque champion joué, retrouvez les champions rencontrés sur le même rôle, avec le volume de parties et le win rate.</p></div><div><strong>{matrix.samples}</strong><small>matchup{matrix.samples > 1 ? "s" : ""} observé{matrix.samples > 1 ? "s" : ""}</small></div></section>
+    <section className="panel matchup-filters"><div><p className="eyebrow">Filtres de consultation</p><h2>Équipe et rôle</h2><p>Les filtres ne modifient aucune donnée enregistrée : ils changent uniquement la lecture de cette matrice.</p></div><label><span>Joueur</span><select value={selectedPlayerId} onChange={(event) => onPlayerChange(event.target.value)}><option value="">Toute l'équipe</option>{analysis.players.map((player) => <option key={player.puuid} value={player.puuid}>{player.displayName} · {roleLabels[roleAssignments[player.puuid] ?? player.role]}</option>)}</select></label><label><span>Rôle</span><select value={selectedRole} onChange={(event) => onRoleChange(event.target.value as MatchupRoleFilter)}><option value="REFERENCE">{selectedPlayer ? "Rôle de référence" : "Rôles de référence"}</option>{(Object.keys(roleLabels) as Role[]).map((role) => <option key={role} value={role}>{roleLabels[role]}</option>)}</select><small>{roleDescription}</small></label></section>
+    <section className="panel matchup-matrix-panel"><div className="panel-head"><div><p className="eyebrow">Champion joué × champion rencontré</p><h2>Matrice des confrontations</h2></div><span className="pill">Consultatif</span></div>{matrix.samples ? <div className="matchup-table-scroll"><div className="matchup-table" style={gridStyle}><div className="matchup-corner">Joué <span>vs rencontré →</span></div>{matrix.columns.map((champion) => <div className={`matchup-column ${championImages[champion] ? "has-image" : ""}`} style={championBackground(champion)} key={champion}><span>{champion}</span></div>)}{matrix.rows.flatMap((playedChampion) => [<div className={`matchup-row-title ${championImages[playedChampion] ? "has-image" : ""}`} style={championBackground(playedChampion)} key={`${playedChampion}:title`}><span>{playedChampion}</span></div>, ...matrix.columns.map((opponentChampion) => { const cell = matrix.cells.get(`${playedChampion}\u0000${opponentChampion}`); if (!cell) return <div className="matchup-cell is-empty" key={`${playedChampion}:${opponentChampion}`}>—</div>; const winRate = Math.round((cell.wins / cell.games) * 100); return <div className={`matchup-cell ${winRate >= 50 ? "is-positive" : "is-negative"}`} key={`${playedChampion}:${opponentChampion}`}><strong>{cell.games} match{cell.games > 1 ? "s" : ""}</strong><small>{winRate} % WR</small></div>; })])}</div></div> : <div className="matchup-no-data"><span>?</span><div><h3>Aucun matchup sur ce filtre</h3><p>Ce joueur n'a pas encore de partie retenue sur ce rôle, ou l'adversaire de lane n'a pas pu être identifié.</p></div></div>}<p className="matchup-note">Un matchup est compté lorsqu'un joueur retenu et un adversaire ont la même position dans une partie synchronisée. Les rôles sélectionnés ici restent temporaires et ne sont jamais enregistrés.</p></section>
+  </section>;
+}
+
 function ReviewDashboard({ analysis, onSync }: { analysis: TeamAnalysis | null; onSync: () => void }) {
   if (!analysis) return <EmptyDashboard onSync={onSync} coaching />;
   const review = analysis.sessionReview;
@@ -410,9 +472,11 @@ function ReviewDashboard({ analysis, onSync }: { analysis: TeamAnalysis | null; 
 }
 
 export default function Home() {
-  const [section, setSection] = useState<"team" | "coaching" | "playbook" | "review">("team");
+  const [section, setSection] = useState<"team" | "coaching" | "matchup" | "playbook" | "review">("team");
   const [selectedId, setSelectedId] = useState("");
   const [roleAssignments, setRoleAssignments] = useState<Record<string, Role>>({});
+  const [matchupPlayerId, setMatchupPlayerId] = useState("");
+  const [matchupRole, setMatchupRole] = useState<MatchupRoleFilter>("REFERENCE");
   const [callerAssignments, setCallerAssignments] = useState<CallerAssignments>({});
   const [sessionFocus, setSessionFocus] = useState<SessionFocusId | "">("");
   const [playbookPlayerId, setPlaybookPlayerId] = useState("");
@@ -435,12 +499,18 @@ export default function Home() {
   const [syncState, setSyncState] = useState<"idle" | "loading" | "error">("idle");
   const [syncError, setSyncError] = useState("");
   const [syncResult, setSyncResult] = useState<SyncResult | null>(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const analysis = syncResult?.analysis ?? null;
   const selectedPlayer = analysis?.players.find((player) => player.puuid === selectedId) ?? analysis?.players[0];
   const selectedRole = selectedPlayer ? roleAssignments[selectedPlayer.puuid] ?? selectedPlayer.role : "FILL";
 
   function updatePlayerRole(playerId: string, role: Role) {
     setRoleAssignments((current) => ({ ...current, [playerId]: role }));
+  }
+
+  function updateMatchupPlayer(playerId: string) {
+    setMatchupPlayerId(playerId);
+    setMatchupRole("REFERENCE");
   }
 
   function updateCaller(domain: CallerDomain, playerId: string) {
@@ -559,6 +629,8 @@ export default function Home() {
       setSelectedId(data.analysis.players[0]?.puuid ?? "");
       setPlaybookPlayerId((current) => data.analysis.players.some((player) => player.puuid === current) ? current : data.analysis.players[0]?.puuid ?? "");
       setRoleAssignments((current) => Object.fromEntries(data.analysis.players.map((player) => [player.puuid, current[player.puuid] ?? player.role])));
+      setMatchupPlayerId("");
+      setMatchupRole("REFERENCE");
       setSyncState("idle");
       setSyncOpen(false);
       setSection("team");
@@ -568,18 +640,19 @@ export default function Home() {
     }
   }
 
-  const heading = section === "team" ? "La salle de coaching" : section === "playbook" ? "Le playbook 4Spel" : section === "review" ? "Review de session" : selectedPlayer ? `${selectedPlayer.displayName}, ${roleLabels[selectedRole]}` : "Coaching individuel";
+  const heading = section === "team" ? "La salle de coaching" : section === "matchup" ? "MatchUp" : section === "playbook" ? "Le playbook 4Spel" : section === "review" ? "Review de session" : selectedPlayer ? `${selectedPlayer.displayName}, ${roleLabels[selectedRole]}` : "Coaching individuel";
   return (
-    <main className="shell">
+    <main className={`shell ${mobileMenuOpen ? "mobile-menu-open" : ""}`}>
+      {mobileMenuOpen && <button className="mobile-nav-backdrop" type="button" aria-label="Fermer le menu" onClick={() => setMobileMenuOpen(false)} />}
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">4</span><span className="brand-copy"><strong>4SPEL</strong><small>Rift Room · LoL Coaching</small></span></div>
         <RosterSelector players={analysis?.players ?? []} selectedId={selectedPlayer?.puuid ?? ""} onSelectPlayer={(playerId) => { setSelectedId(playerId); setSection("coaching"); }} onSync={() => setSyncOpen(true)} />
-        <nav><button type="button" className={section === "team" ? "active" : ""} onClick={() => setSection("team")}><span>◫</span>Vue d’équipe</button><button type="button" className={section === "playbook" ? "active" : ""} onClick={() => setSection("playbook")}><span>≡</span>Playbook</button><button type="button" className={section === "coaching" ? "active" : ""} onClick={() => setSection("coaching")}><span>◇</span>Coaching</button><button type="button" className={section === "review" ? "active" : ""} onClick={() => setSection("review")}><span>✦</span>Review & draft</button></nav>
+        <nav onClick={() => setMobileMenuOpen(false)}><button type="button" className={section === "team" ? "active" : ""} onClick={() => setSection("team")}><span>◫</span>Vue d’équipe</button><button type="button" className={section === "matchup" ? "active" : ""} onClick={() => setSection("matchup")}><span>×</span>MatchUp</button><button type="button" className={section === "playbook" ? "active" : ""} onClick={() => setSection("playbook")}><span>≡</span>Playbook</button><button type="button" className={section === "coaching" ? "active" : ""} onClick={() => setSection("coaching")}><span>◇</span>Coaching</button><button type="button" className={section === "review" ? "active" : ""} onClick={() => setSection("review")}><span>✦</span>Review & draft</button></nav>
         <div className="sidebar-bottom"><div className="sync"><span className="pulse" />{syncResult ? "Données Riot en session" : "Aucune donnée affichée"}</div><button className="settings" type="button" onClick={() => setSyncOpen(true)}>⚙ Synchroniser</button></div>
       </aside>
       <section className="content">
-        <header className="topbar"><div><p className="eyebrow">{section === "team" ? "4SPEL · RIFT ROOM" : section === "playbook" ? "4SPEL · CADRE D'ENTRAÎNEMENT" : section === "review" ? "4SPEL · PLAYBOOK & REVIEW" : "RIFT ROOM · COACHING INDIVIDUEL"}</p><h1>{section === "team" ? "La salle de coaching" : section === "playbook" ? "Le playbook 4Spel" : section === "review" ? "Review de session" : selectedPlayer ? `${selectedPlayer.displayName}, ${roleLabels[selectedRole]}` : "Coaching individuel"}</h1></div><div className="header-actions"><button className="sync-button" onClick={() => setSyncOpen(true)}>↻ Synchroniser</button></div></header>
-        {section === "team" ? (syncResult ? <TeamDashboard result={syncResult} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelectPlayer={setSelectedId} onShowCoaching={() => setSection("coaching")} onSync={() => setSyncOpen(true)} /> : <EmptyDashboard onSync={() => setSyncOpen(true)} />) : section === "playbook" ? <PlaybookDashboard analysis={analysis} roleAssignments={roleAssignments} callerAssignments={callerAssignments} sessionFocus={sessionFocus} selectedPlayerId={playbookPlayerId} championTracks={championTracks} playerAxes={playerAxes} trainingStatus={trainingStatus} trainingGoal={trainingGoal} trainingChecklist={trainingChecklist} milestoneProgress={milestoneProgress} reviewDraft={reviewDraft} reviews={reviews} opponentIds={opponentIds} scoutingState={scoutingState} scoutingError={scoutingError} scoutingReport={scoutingReport} targetBans={targetBans} draftPlan={draftPlan} onCallerChange={updateCaller} onSessionFocusChange={setSessionFocus} onSelectPlayer={setPlaybookPlayerId} onChampionTrackChange={updateChampionTrack} onAxisChange={updatePlayerAxis} onTrainingGoalChange={setTrainingGoal} onToggleTrainingStep={toggleTrainingStep} onTrainingSessionAction={updateTrainingSession} onToggleMilestone={toggleMilestone} onReviewDraftChange={updateReviewDraft} onAddReview={addReview} onRemoveReview={removeReview} onOpponentIdsChange={updateOpponentIds} onScoutingScan={scoutOpponents} onToggleTargetBan={toggleTargetBan} onDraftPlanChange={updateDraftPlan} onSync={() => setSyncOpen(true)} /> : section === "coaching" ? <CoachingDashboard analysis={analysis} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelect={setSelectedId} onSync={() => setSyncOpen(true)} /> : <ReviewDashboard analysis={analysis} onSync={() => setSyncOpen(true)} />}
+        <header className="topbar"><div><button className="mobile-menu-toggle" type="button" aria-label={mobileMenuOpen ? "Fermer le menu" : "Ouvrir le menu"} aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)}><i /><i /><i /></button><p className="eyebrow">{section === "team" ? "4SPEL · RIFT ROOM" : section === "matchup" ? "4SPEL · MATCHUP" : section === "playbook" ? "4SPEL · CADRE D'ENTRAÎNEMENT" : section === "review" ? "4SPEL · PLAYBOOK & REVIEW" : "RIFT ROOM · COACHING INDIVIDUEL"}</p><h1>{heading}</h1></div><div className="header-actions"><button className="sync-button" onClick={() => setSyncOpen(true)}>↻ Synchroniser</button></div></header>
+        {section === "team" ? (syncResult ? <TeamDashboard result={syncResult} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelectPlayer={setSelectedId} onShowCoaching={() => setSection("coaching")} onSync={() => setSyncOpen(true)} /> : <EmptyDashboard onSync={() => setSyncOpen(true)} />) : section === "matchup" ? <MatchupDashboard result={syncResult} roleAssignments={roleAssignments} selectedPlayerId={matchupPlayerId} selectedRole={matchupRole} onPlayerChange={updateMatchupPlayer} onRoleChange={setMatchupRole} onSync={() => setSyncOpen(true)} /> : section === "playbook" ? <PlaybookDashboard analysis={analysis} roleAssignments={roleAssignments} callerAssignments={callerAssignments} sessionFocus={sessionFocus} selectedPlayerId={playbookPlayerId} championTracks={championTracks} playerAxes={playerAxes} trainingStatus={trainingStatus} trainingGoal={trainingGoal} trainingChecklist={trainingChecklist} milestoneProgress={milestoneProgress} reviewDraft={reviewDraft} reviews={reviews} opponentIds={opponentIds} scoutingState={scoutingState} scoutingError={scoutingError} scoutingReport={scoutingReport} targetBans={targetBans} draftPlan={draftPlan} onCallerChange={updateCaller} onSessionFocusChange={setSessionFocus} onSelectPlayer={setPlaybookPlayerId} onChampionTrackChange={updateChampionTrack} onAxisChange={updatePlayerAxis} onTrainingGoalChange={setTrainingGoal} onToggleTrainingStep={toggleTrainingStep} onTrainingSessionAction={updateTrainingSession} onToggleMilestone={toggleMilestone} onReviewDraftChange={updateReviewDraft} onAddReview={addReview} onRemoveReview={removeReview} onOpponentIdsChange={updateOpponentIds} onScoutingScan={scoutOpponents} onToggleTargetBan={toggleTargetBan} onDraftPlanChange={updateDraftPlan} onSync={() => setSyncOpen(true)} /> : section === "coaching" ? <CoachingDashboard analysis={analysis} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelect={setSelectedId} onSync={() => setSyncOpen(true)} /> : <ReviewDashboard analysis={analysis} onSync={() => setSyncOpen(true)} />}
       </section>
       {syncOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => syncState !== "loading" && setSyncOpen(false)}><section className="sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" aria-label="Fermer" onClick={() => syncState !== "loading" && setSyncOpen(false)}>×</button><p className="eyebrow">Connexion Riot</p><h2 id="sync-title">Synchroniser les parties de l’équipe</h2><p className="modal-copy">Les cinq Riot ID 4Spel sont préremplis. Rift Room parcourt jusqu’à 100 parties par joueur, conserve les 40 parties d’équipe les plus récentes et lit les timelines des 8 dernières.</p><label className="riot-label">Riot ID <span>un par ligne</span><textarea value={riotIds} onChange={(event) => { setRiotIds(event.target.value); setSyncState("idle"); }} placeholder={defaultRoster} rows={6} autoFocus /></label>{syncState === "error" && <p className="form-error">{syncError}</p>}<div className="modal-footer"><small>La clé API reste côté serveur. L’analyse peut dépasser une minute avec la lecture Timeline sur une clé de développement.</small><button className="sync-button" type="button" onClick={syncTeam} disabled={syncState === "loading"}>{syncState === "loading" ? "Analyse Riot en cours…" : "Lancer l’analyse"}</button></div></section></div>}
     </main>

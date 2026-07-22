@@ -1,5 +1,5 @@
 import { analyzeTeamMatches, findTeamMatches } from "@/lib/analytics";
-import { getChampionNamesById } from "@/lib/data-dragon";
+import { getChampionCatalog } from "@/lib/data-dragon";
 import { asRegionalRouting, getMatch, getMatchIds, getMatchTimeline, resolveRiotAccount } from "@/lib/riot";
 
 export const runtime = "nodejs";
@@ -52,12 +52,13 @@ export async function POST(request: Request) {
     const matches = findTeamMatches(rawMatches, new Set(accounts.map((account) => account.puuid)), minTeammates);
     const timelineResults = await Promise.allSettled(matches.slice(0, TIMELINE_SAMPLE_SIZE).map(async (match) => [match.id, await getMatchTimeline(regionalRouting, match.id)] as const));
     const timelines = new Map(timelineResults.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
-    const championNames = await getChampionNamesById();
+    const championCatalog = await getChampionCatalog();
 
     return Response.json({
       roster: accounts.map(({ puuid, gameName, tagLine }) => ({ puuid, gameName, tagLine })),
       matches,
-      analysis: analyzeTeamMatches(matches, timelines, championNames, accounts.length),
+      championImages: championCatalog.imagesByName,
+      analysis: analyzeTeamMatches(matches, timelines, championCatalog.namesById, accounts.length),
       scanned: {
         requestedMatchesPerPlayer: matchCount,
         candidateMatches: sharedMatchIds.length,
