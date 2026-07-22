@@ -1,8 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { normalizeRole } from "@/lib/analytics";
-import type { ChampionAnalysis, ObjectiveSetup, ObjectiveSetupAnalysis, PlayerAnalysis, SyncedMatch, TeamAnalysis, TimelinePlayerStats } from "@/lib/analytics";
+import type { ChampionAnalysis, MapReviewEvent, MapReviewEventType, ObjectiveSetup, ObjectiveSetupAnalysis, PlayerAnalysis, RiotPosition, SyncedMatch, TeamAnalysis, TimelinePlayerStats } from "@/lib/analytics";
 import type { ScoutingReport } from "@/lib/scouting";
 import type { CoachingInsight, Role } from "@/lib/types";
 
@@ -59,6 +59,23 @@ type MatchupCell = {
   games: number;
   wins: number;
 };
+
+type MapMode = "review" | "plan";
+type PlanningTool = "ward" | "danger" | "rally" | "objective" | "route";
+type PlanningMarker = { id: number; type: Exclude<PlanningTool, "route">; label: string; position: RiotPosition };
+
+const summonersRiftMapUrl = "https://raw.communitydragon.org/16.11/game/assets/maps/info/map11/2dlevelminimap_base_baron1.png";
+const summonersRiftFallbackMapUrl = "https://raw.communitydragon.org/13.14/game/assets/maps/info/map11/2dlevelminimap.png";
+const mapCoordinateLimit = 15_000;
+const mapEventLabels: Record<MapReviewEventType, string> = { objective: "Objectifs", ward: "Wards", death: "Morts", kill: "Kills" };
+const mapEventSymbols: Record<MapReviewEventType, string> = { objective: "◉", ward: "◌", death: "×", kill: "✦" };
+const planningTools: { id: PlanningTool; label: string; symbol: string; detail: string }[] = [
+  { id: "ward", label: "Vision", symbol: "◌", detail: "Ward ou zone de contrôle" },
+  { id: "danger", label: "Danger", symbol: "!", detail: "Zone à éviter ou angle adverse" },
+  { id: "rally", label: "Rally", symbol: "+", detail: "Point de regroupement" },
+  { id: "objective", label: "Objectif", symbol: "◉", detail: "Priorité de jeu" },
+  { id: "route", label: "Trajet", symbol: "→", detail: "Tracer un déplacement" }
+];
 
 const callerDomains: { id: CallerDomain; label: string; description: string; preferredRoles: Role[] }[] = [
   { id: "macro", label: "Objectifs & tempo", description: "Décide du drake, héraut ou Baron à préparer.", preferredRoles: ["JUNGLE", "UTILITY", "MIDDLE"] },
@@ -289,6 +306,111 @@ function ObjectiveTimelinePanel({ objectiveSetup }: { objectiveSetup: ObjectiveS
   </section>;
 }
 
+function mapPositionStyle(position: RiotPosition) {
+  return {
+    left: `${Math.max(0, Math.min(100, (position.x / mapCoordinateLimit) * 100))}%`,
+    top: `${Math.max(0, Math.min(100, 100 - (position.y / mapCoordinateLimit) * 100))}%`
+  };
+}
+
+function mapPositionFromPointer(event: ReactPointerEvent<HTMLDivElement>): RiotPosition {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  const x = ((event.clientX - bounds.left) / bounds.width) * mapCoordinateLimit;
+  const y = (1 - (event.clientY - bounds.top) / bounds.height) * mapCoordinateLimit;
+  return {
+    x: Math.round(Math.max(0, Math.min(mapCoordinateLimit, x))),
+    y: Math.round(Math.max(0, Math.min(mapCoordinateLimit, y)))
+  };
+}
+
+function SummonersRiftMapImage({ alt }: { alt: string }) {
+  const [useFallback, setUseFallback] = useState(false);
+  return <img src={useFallback ? summonersRiftFallbackMapUrl : summonersRiftMapUrl} alt={alt} onError={() => !useFallback && setUseFallback(true)} />;
+}
+
+function MapRoom({ analysis, onSync }: { analysis: TeamAnalysis | null; onSync: () => void }) {
+  const [mode, setMode] = useState<MapMode>("review");
+  const [selectedMatchId, setSelectedMatchId] = useState("");
+  const [playbackSeconds, setPlaybackSeconds] = useState(0);
+  const [selectedEventId, setSelectedEventId] = useState("");
+  const [visibleTypes, setVisibleTypes] = useState<Record<MapReviewEventType, boolean>>({ objective: true, ward: true, death: true, kill: true });
+  const [planningTool, setPlanningTool] = useState<PlanningTool>("ward");
+  const [planningLabel, setPlanningLabel] = useState("");
+  const [planningMarkers, setPlanningMarkers] = useState<PlanningMarker[]>([]);
+  const [routePoints, setRoutePoints] = useState<RiotPosition[]>([]);
+
+  const games = useMemo(() => {
+    const grouped = new Map<string, MapReviewEvent[]>();
+    for (const event of analysis?.timeline.mapEvents ?? []) grouped.set(event.matchId, [...(grouped.get(event.matchId) ?? []), event]);
+    return [...grouped.entries()]
+      .map(([id, events]) => ({ id, events: events.sort((left, right) => left.timestampSeconds - right.timestampSeconds), startedAt: events[0]?.gameStartedAt, duration: events[0]?.gameDurationSeconds ?? 0, teamWon: events[0]?.teamWon ?? false }))
+      .sort((left, right) => (right.startedAt ?? 0) - (left.startedAt ?? 0));
+  }, [analysis]);
+  const activeGame = games.find((game) => game.id === selectedMatchId) ?? games[0];
+  const gameEvents = activeGame?.events ?? [];
+  const filteredGameEvents = gameEvents.filter((event) => visibleTypes[event.type]);
+  const revealedEvents = filteredGameEvents.filter((event) => event.timestampSeconds <= playbackSeconds);
+  const selectedEvent = gameEvents.find((event) => event.id === selectedEventId);
+  const currentPlanningTool = planningTools.find((tool) => tool.id === planningTool)!;
+
+  function selectGame(matchId: string) {
+    setSelectedMatchId(matchId);
+    setPlaybackSeconds(0);
+    setSelectedEventId("");
+  }
+
+  function selectReviewEvent(event: MapReviewEvent) {
+    setSelectedEventId(event.id);
+    setPlaybackSeconds(event.timestampSeconds);
+  }
+
+  function toggleEventType(type: MapReviewEventType) {
+    setVisibleTypes((current) => ({ ...current, [type]: !current[type] }));
+  }
+
+  function addPlanningPoint(event: ReactPointerEvent<HTMLDivElement>) {
+    if (mode !== "plan" || event.button !== 0) return;
+    const position = mapPositionFromPointer(event);
+    if (planningTool === "route") {
+      setRoutePoints((current) => [...current, position]);
+      return;
+    }
+    setPlanningMarkers((current) => [...current, {
+      id: Date.now(),
+      type: planningTool,
+      label: planningLabel.trim() || currentPlanningTool.label,
+      position
+    }]);
+  }
+
+  return <section className="map-room">
+    <section className="map-hero">
+      <div><p className="eyebrow">4SPEL · MAP ROOM</p><h2>Voir la partie. Préparer la suivante.</h2><p>Relisez les événements réellement renvoyés par la Timeline Riot, ou dessinez votre setup d'objectif directement sur la Faille.</p></div>
+      <div className="map-hero-stats"><strong>{analysis?.timeline.mapEvents.length ?? 0}</strong><small>événements placés<br />sur la carte</small></div>
+    </section>
+
+    <section className="map-mode-tabs" aria-label="Mode de la carte">
+      <button className={mode === "review" ? "active" : ""} type="button" aria-pressed={mode === "review"} onClick={() => setMode("review")}><span>◫</span><div><strong>Review Riot</strong><small>Timeline, horloge et événements de game</small></div></button>
+      <button className={mode === "plan" ? "active" : ""} type="button" aria-pressed={mode === "plan"} onClick={() => setMode("plan")}><span>✦</span><div><strong>Planification</strong><small>Balises et trajets pour votre prochain setup</small></div></button>
+    </section>
+
+    {mode === "review" ? <section className="map-workspace">
+      <div className="map-controls panel">
+        <div><p className="eyebrow">Partie synchronisée</p><h2>Rejouer une séquence</h2></div>
+        {games.length ? <><label><span>Game</span><select value={activeGame?.id ?? ""} onChange={(event) => selectGame(event.target.value)}>{games.map((game) => <option key={game.id} value={game.id}>{formatGameDateTime(game.startedAt)} · {game.teamWon ? "Victoire" : "Défaite"}</option>)}</select></label><div className="map-clock"><div><strong>{formatGameClock(playbackSeconds)}</strong><small>/ {formatDuration(activeGame?.duration ?? 0)}</small></div><input type="range" min="0" max={Math.max(activeGame?.duration ?? 0, 1)} step="1" value={Math.min(playbackSeconds, activeGame?.duration ?? 0)} onChange={(event) => { setPlaybackSeconds(Number(event.target.value)); setSelectedEventId(""); }} /></div><div className="map-filter-list">{(Object.keys(mapEventLabels) as MapReviewEventType[]).map((type) => <button className={visibleTypes[type] ? `active ${type}` : type} type="button" aria-pressed={visibleTypes[type]} onClick={() => toggleEventType(type)} key={type}><span>{mapEventSymbols[type]}</span>{mapEventLabels[type]}</button>)}</div></> : <div className="map-no-events"><span>?</span><div><h3>Pas encore de Timeline à cartographier</h3><p>Synchronisez l'équipe : Rift Room charge les timelines des parties récentes, puis les wards, morts, kills et objectifs avec une position sont disponibles ici.</p><button className="sync-button" type="button" onClick={onSync}>Synchroniser l'équipe</button></div></div>}
+      </div>
+      <div className="map-layout">
+        <div className="rift-map-viewport"><div className="rift-map review-map"><SummonersRiftMapImage alt="Carte de la Faille de l'invocateur" />{revealedEvents.map((event) => <button className={`map-marker ${event.type} ${event.id === selectedEventId ? "is-selected" : ""}`} key={event.id} style={mapPositionStyle(event.position)} type="button" aria-label={`${event.label}, ${formatGameClock(event.timestampSeconds)}`} title={`${formatGameClock(event.timestampSeconds)} · ${event.label}`} onPointerDown={(pointerEvent) => pointerEvent.stopPropagation()} onClick={() => selectReviewEvent(event)}><span>{mapEventSymbols[event.type]}</span></button>)}</div></div>
+        <aside className="map-event-panel"><div className="map-event-panel-head"><div><p className="eyebrow">Fil d'événements</p><h3>{activeGame ? `${revealedEvents.length}/${filteredGameEvents.length} révélés` : "En attente"}</h3></div>{selectedEvent && <button type="button" onClick={() => setSelectedEventId("")}>×</button>}</div>{activeGame ? <div className="map-event-list">{filteredGameEvents.length ? filteredGameEvents.map((event) => <button className={`${event.type} ${event.id === selectedEventId ? "is-selected" : ""} ${event.timestampSeconds > playbackSeconds ? "is-future" : ""}`} type="button" key={event.id} onClick={() => selectReviewEvent(event)}><span>{mapEventSymbols[event.type]}</span><div><strong>{event.label}</strong><small>{formatGameClock(event.timestampSeconds)} · {event.detail}</small></div></button>) : <p className="map-empty-list">Tous les types d'événements sont masqués.</p>}</div> : <p className="map-empty-list">Aucune partie Timeline sélectionnable.</p>}</aside>
+      </div>
+      <p className="map-method">Les positions proviennent des événements Timeline (et non d'une VOD image par image). Les équipes peuvent donc rejouer un setup, repérer une mort ou vérifier l'ordre des wards, puis compléter l'analyse à partir de la VOD.</p>
+    </section> : <section className="map-workspace">
+      <div className="map-plan-controls panel"><div><p className="eyebrow">Tableau tactique</p><h2>Dessiner le prochain setup</h2><p>Choisissez un outil, puis cliquez sur la carte. Les repères restent disponibles pendant cette session uniquement.</p></div><label><span>Libellé de la prochaine balise</span><input value={planningLabel} onChange={(event) => setPlanningLabel(event.target.value)} placeholder="Ex. contrôle pixel bush" /></label><div className="planning-tool-list">{planningTools.map((tool) => <button className={planningTool === tool.id ? "active" : ""} type="button" aria-pressed={planningTool === tool.id} key={tool.id} onClick={() => setPlanningTool(tool.id)}><span>{tool.symbol}</span><div><strong>{tool.label}</strong><small>{tool.detail}</small></div></button>)}</div><div className="planning-actions"><button type="button" onClick={() => setPlanningMarkers((current) => current.slice(0, -1))} disabled={!planningMarkers.length}>Retirer dernière balise</button><button type="button" onClick={() => setRoutePoints((current) => current.slice(0, -1))} disabled={!routePoints.length}>Retirer dernier point</button><button className="danger" type="button" onClick={() => { setPlanningMarkers([]); setRoutePoints([]); }}>Effacer le plan</button></div></div>
+      <div className="planning-map-wrap"><div className="rift-map-viewport"><div className="rift-map plan-map" role="application" aria-label="Carte de planification : cliquez pour placer une balise ou un point de trajet" onPointerDown={addPlanningPoint}><SummonersRiftMapImage alt="Carte interactive de la Faille de l'invocateur" /><svg className="map-route" viewBox={`0 0 ${mapCoordinateLimit} ${mapCoordinateLimit}`} aria-hidden="true"><polyline points={routePoints.map((point) => `${point.x},${mapCoordinateLimit - point.y}`).join(" ")} /></svg>{planningMarkers.map((marker) => <button className={`map-marker planning ${marker.type}`} type="button" key={marker.id} style={mapPositionStyle(marker.position)} title={marker.label} onPointerDown={(pointerEvent) => pointerEvent.stopPropagation()} onClick={() => setPlanningMarkers((current) => current.filter((item) => item.id !== marker.id))}><span>{marker.type === "ward" ? "◌" : marker.type === "danger" ? "!" : marker.type === "rally" ? "+" : "◉"}</span><em>{marker.label}</em></button>)}</div></div><div className="planning-map-note"><span>{currentPlanningTool.symbol}</span><div><strong>{currentPlanningTool.label} sélectionné</strong><p>{planningTool === "route" ? "Cliquez plusieurs points pour tracer un déplacement. Utilisez le bouton d'annulation pour ajuster le tracé." : "Cliquez sur la Faille pour ajouter un repère. Cliquez une balise existante pour la retirer."}</p></div></div></div>
+    </section>}
+  </section>;
+}
+
 function DraftScouting({ opponentIds, state, error, report, targetBans, draftPlan, onOpponentIdsChange, onScan, onToggleBan, onDraftPlanChange }: { opponentIds: string; state: "idle" | "loading" | "error"; error: string; report: ScoutingReport | null; targetBans: string[]; draftPlan: DraftPlan; onOpponentIdsChange: (value: string) => void; onScan: () => void; onToggleBan: (champion: string) => void; onDraftPlanChange: (field: keyof DraftPlan, value: string) => void }) {
   const opponentCount = riotPlayersFromText(opponentIds).length;
   return <section className="panel draft-scouting">
@@ -472,7 +594,7 @@ function ReviewDashboard({ analysis, onSync }: { analysis: TeamAnalysis | null; 
 }
 
 export default function Home() {
-  const [section, setSection] = useState<"team" | "coaching" | "matchup" | "playbook" | "review">("team");
+  const [section, setSection] = useState<"team" | "coaching" | "matchup" | "map" | "playbook" | "review">("team");
   const [selectedId, setSelectedId] = useState("");
   const [roleAssignments, setRoleAssignments] = useState<Record<string, Role>>({});
   const [matchupPlayerId, setMatchupPlayerId] = useState("");
@@ -640,19 +762,19 @@ export default function Home() {
     }
   }
 
-  const heading = section === "team" ? "La salle de coaching" : section === "matchup" ? "MatchUp" : section === "playbook" ? "Le playbook 4Spel" : section === "review" ? "Review de session" : selectedPlayer ? `${selectedPlayer.displayName}, ${roleLabels[selectedRole]}` : "Coaching individuel";
+  const heading = section === "team" ? "La salle de coaching" : section === "matchup" ? "MatchUp" : section === "map" ? "Map Room" : section === "playbook" ? "Le playbook 4Spel" : section === "review" ? "Review de session" : selectedPlayer ? `${selectedPlayer.displayName}, ${roleLabels[selectedRole]}` : "Coaching individuel";
   return (
     <main className={`shell ${mobileMenuOpen ? "mobile-menu-open" : ""}`}>
       {mobileMenuOpen && <button className="mobile-nav-backdrop" type="button" aria-label="Fermer le menu" onClick={() => setMobileMenuOpen(false)} />}
       <aside className="sidebar">
         <div className="brand"><span className="brand-mark">4</span><span className="brand-copy"><strong>4SPEL</strong><small>Rift Room · LoL Coaching</small></span></div>
         <RosterSelector players={analysis?.players ?? []} selectedId={selectedPlayer?.puuid ?? ""} onSelectPlayer={(playerId) => { setSelectedId(playerId); setSection("coaching"); }} onSync={() => setSyncOpen(true)} />
-        <nav onClick={() => setMobileMenuOpen(false)}><button type="button" className={section === "team" ? "active" : ""} onClick={() => setSection("team")}><span>◫</span>Vue d’équipe</button><button type="button" className={section === "matchup" ? "active" : ""} onClick={() => setSection("matchup")}><span>×</span>MatchUp</button><button type="button" className={section === "playbook" ? "active" : ""} onClick={() => setSection("playbook")}><span>≡</span>Playbook</button><button type="button" className={section === "coaching" ? "active" : ""} onClick={() => setSection("coaching")}><span>◇</span>Coaching</button><button type="button" className={section === "review" ? "active" : ""} onClick={() => setSection("review")}><span>✦</span>Review & draft</button></nav>
+        <nav onClick={() => setMobileMenuOpen(false)}><button type="button" className={section === "team" ? "active" : ""} onClick={() => setSection("team")}><span>◫</span>Vue d’équipe</button><button type="button" className={section === "matchup" ? "active" : ""} onClick={() => setSection("matchup")}><span>×</span>MatchUp</button><button type="button" className={section === "map" ? "active" : ""} onClick={() => setSection("map")}><span>⌖</span>Map Room</button><button type="button" className={section === "playbook" ? "active" : ""} onClick={() => setSection("playbook")}><span>≡</span>Playbook</button><button type="button" className={section === "coaching" ? "active" : ""} onClick={() => setSection("coaching")}><span>◇</span>Coaching</button><button type="button" className={section === "review" ? "active" : ""} onClick={() => setSection("review")}><span>✦</span>Review & draft</button></nav>
         <div className="sidebar-bottom"><div className="sync"><span className="pulse" />{syncResult ? "Données Riot en session" : "Aucune donnée affichée"}</div><button className="settings" type="button" onClick={() => setSyncOpen(true)}>⚙ Synchroniser</button></div>
       </aside>
       <section className="content">
-        <header className="topbar"><div><button className="mobile-menu-toggle" type="button" aria-label={mobileMenuOpen ? "Fermer le menu" : "Ouvrir le menu"} aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)}><i /><i /><i /></button><p className="eyebrow">{section === "team" ? "4SPEL · RIFT ROOM" : section === "matchup" ? "4SPEL · MATCHUP" : section === "playbook" ? "4SPEL · CADRE D'ENTRAÎNEMENT" : section === "review" ? "4SPEL · PLAYBOOK & REVIEW" : "RIFT ROOM · COACHING INDIVIDUEL"}</p><h1>{heading}</h1></div><div className="header-actions"><button className="sync-button" onClick={() => setSyncOpen(true)}>↻ Synchroniser</button></div></header>
-        {section === "team" ? (syncResult ? <TeamDashboard result={syncResult} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelectPlayer={setSelectedId} onShowCoaching={() => setSection("coaching")} onSync={() => setSyncOpen(true)} /> : <EmptyDashboard onSync={() => setSyncOpen(true)} />) : section === "matchup" ? <MatchupDashboard result={syncResult} roleAssignments={roleAssignments} selectedPlayerId={matchupPlayerId} selectedRole={matchupRole} onPlayerChange={updateMatchupPlayer} onRoleChange={setMatchupRole} onSync={() => setSyncOpen(true)} /> : section === "playbook" ? <PlaybookDashboard analysis={analysis} roleAssignments={roleAssignments} callerAssignments={callerAssignments} sessionFocus={sessionFocus} selectedPlayerId={playbookPlayerId} championTracks={championTracks} playerAxes={playerAxes} trainingStatus={trainingStatus} trainingGoal={trainingGoal} trainingChecklist={trainingChecklist} milestoneProgress={milestoneProgress} reviewDraft={reviewDraft} reviews={reviews} opponentIds={opponentIds} scoutingState={scoutingState} scoutingError={scoutingError} scoutingReport={scoutingReport} targetBans={targetBans} draftPlan={draftPlan} onCallerChange={updateCaller} onSessionFocusChange={setSessionFocus} onSelectPlayer={setPlaybookPlayerId} onChampionTrackChange={updateChampionTrack} onAxisChange={updatePlayerAxis} onTrainingGoalChange={setTrainingGoal} onToggleTrainingStep={toggleTrainingStep} onTrainingSessionAction={updateTrainingSession} onToggleMilestone={toggleMilestone} onReviewDraftChange={updateReviewDraft} onAddReview={addReview} onRemoveReview={removeReview} onOpponentIdsChange={updateOpponentIds} onScoutingScan={scoutOpponents} onToggleTargetBan={toggleTargetBan} onDraftPlanChange={updateDraftPlan} onSync={() => setSyncOpen(true)} /> : section === "coaching" ? <CoachingDashboard analysis={analysis} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelect={setSelectedId} onSync={() => setSyncOpen(true)} /> : <ReviewDashboard analysis={analysis} onSync={() => setSyncOpen(true)} />}
+        <header className="topbar"><div><button className="mobile-menu-toggle" type="button" aria-label={mobileMenuOpen ? "Fermer le menu" : "Ouvrir le menu"} aria-expanded={mobileMenuOpen} onClick={() => setMobileMenuOpen((open) => !open)}><i /><i /><i /></button><p className="eyebrow">{section === "team" ? "4SPEL · RIFT ROOM" : section === "matchup" ? "4SPEL · MATCHUP" : section === "map" ? "4SPEL · CARTE TACTIQUE" : section === "playbook" ? "4SPEL · CADRE D'ENTRAÎNEMENT" : section === "review" ? "4SPEL · PLAYBOOK & REVIEW" : "RIFT ROOM · COACHING INDIVIDUEL"}</p><h1>{heading}</h1></div><div className="header-actions"><button className="sync-button" onClick={() => setSyncOpen(true)}>↻ Synchroniser</button></div></header>
+        {section === "team" ? (syncResult ? <TeamDashboard result={syncResult} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelectPlayer={setSelectedId} onShowCoaching={() => setSection("coaching")} onSync={() => setSyncOpen(true)} /> : <EmptyDashboard onSync={() => setSyncOpen(true)} />) : section === "matchup" ? <MatchupDashboard result={syncResult} roleAssignments={roleAssignments} selectedPlayerId={matchupPlayerId} selectedRole={matchupRole} onPlayerChange={updateMatchupPlayer} onRoleChange={setMatchupRole} onSync={() => setSyncOpen(true)} /> : section === "map" ? <MapRoom analysis={analysis} onSync={() => setSyncOpen(true)} /> : section === "playbook" ? <PlaybookDashboard analysis={analysis} roleAssignments={roleAssignments} callerAssignments={callerAssignments} sessionFocus={sessionFocus} selectedPlayerId={playbookPlayerId} championTracks={championTracks} playerAxes={playerAxes} trainingStatus={trainingStatus} trainingGoal={trainingGoal} trainingChecklist={trainingChecklist} milestoneProgress={milestoneProgress} reviewDraft={reviewDraft} reviews={reviews} opponentIds={opponentIds} scoutingState={scoutingState} scoutingError={scoutingError} scoutingReport={scoutingReport} targetBans={targetBans} draftPlan={draftPlan} onCallerChange={updateCaller} onSessionFocusChange={setSessionFocus} onSelectPlayer={setPlaybookPlayerId} onChampionTrackChange={updateChampionTrack} onAxisChange={updatePlayerAxis} onTrainingGoalChange={setTrainingGoal} onToggleTrainingStep={toggleTrainingStep} onTrainingSessionAction={updateTrainingSession} onToggleMilestone={toggleMilestone} onReviewDraftChange={updateReviewDraft} onAddReview={addReview} onRemoveReview={removeReview} onOpponentIdsChange={updateOpponentIds} onScoutingScan={scoutOpponents} onToggleTargetBan={toggleTargetBan} onDraftPlanChange={updateDraftPlan} onSync={() => setSyncOpen(true)} /> : section === "coaching" ? <CoachingDashboard analysis={analysis} selectedId={selectedPlayer?.puuid ?? ""} roleAssignments={roleAssignments} onRoleChange={updatePlayerRole} onSelect={setSelectedId} onSync={() => setSyncOpen(true)} /> : <ReviewDashboard analysis={analysis} onSync={() => setSyncOpen(true)} />}
       </section>
       {syncOpen && <div className="modal-backdrop" role="presentation" onMouseDown={() => syncState !== "loading" && setSyncOpen(false)}><section className="sync-modal" role="dialog" aria-modal="true" aria-labelledby="sync-title" onMouseDown={(event) => event.stopPropagation()}><button className="modal-close" type="button" aria-label="Fermer" onClick={() => syncState !== "loading" && setSyncOpen(false)}>×</button><p className="eyebrow">Connexion Riot</p><h2 id="sync-title">Synchroniser les parties de l’équipe</h2><p className="modal-copy">Les cinq Riot ID 4Spel sont préremplis. Rift Room parcourt jusqu’à 100 parties par joueur, conserve les 40 parties d’équipe les plus récentes et lit les timelines des 8 dernières.</p><label className="riot-label">Riot ID <span>un par ligne</span><textarea value={riotIds} onChange={(event) => { setRiotIds(event.target.value); setSyncState("idle"); }} placeholder={defaultRoster} rows={6} autoFocus /></label>{syncState === "error" && <p className="form-error">{syncError}</p>}<div className="modal-footer"><small>La clé API reste côté serveur. L’analyse peut dépasser une minute avec la lecture Timeline sur une clé de développement.</small><button className="sync-button" type="button" onClick={syncTeam} disabled={syncState === "loading"}>{syncState === "loading" ? "Analyse Riot en cours…" : "Lancer l’analyse"}</button></div></section></div>}
     </main>
